@@ -135,7 +135,15 @@ async fn download_small_file_once(
     dest: &PathBuf,
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
 ) -> InstallerResult<()> {
-    let bytes = CLIENT.get(url).send().await?.bytes().await?;
+    let resp = CLIENT.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(InstallerError::DownloadFailed(format!(
+            "HTTP {} for {}",
+            resp.status(),
+            url
+        )));
+    }
+    let bytes = resp.bytes().await?;
 
     // Emit install progress event for the entire file
     #[cfg(feature = "events")]

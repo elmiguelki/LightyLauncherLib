@@ -14,6 +14,7 @@ use thiserror::Error;
 /// pool, HTTP/2 window scaling, TCP keepalive, and aggressive compression.
 pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MiguelkiNetworkLauncher/0.5.11")
         // Connection pooling - balance between performance and OS limits
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(Duration::from_secs(90)))
@@ -50,6 +51,7 @@ pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     /// an already-plain response or a mislabeled body.
     pub static RAW_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MiguelkiNetworkLauncher/0.5.11")
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(Duration::from_secs(90)))
         .http2_initial_stream_window_size(Some(2 * 1024 * 1024))
@@ -126,6 +128,8 @@ pub fn build_fallback_urls(original: &str) -> Vec<String> {
 
     if host.eq_ignore_ascii_case("libraries.minecraft.net") && !path.is_empty() {
         push_fastmcmirror(&mut urls, "https://bmclapi2.bangbang93.com/maven", path);
+        urls.push(format!("https://repo1.maven.org/maven2{}", path));
+        urls.push(format!("https://maven.fabricmc.net{}", path));
     }
 
     if host.eq_ignore_ascii_case("meta.fabricmc.net") && !path.is_empty() {
@@ -139,6 +143,7 @@ pub fn build_fallback_urls(original: &str) -> Vec<String> {
 
     if host.eq_ignore_ascii_case("maven.fabricmc.net") && !path.is_empty() {
         push_fastmcmirror(&mut urls, "https://bmclapi2.bangbang93.com/maven", path);
+        urls.push(format!("https://repo1.maven.org/maven2{}", path));
         if let Some(base) = env_base("LIGHTY_MIRROR_FABRIC_MAVEN") {
             urls.push(join_base_and_path(&base, path));
         }
@@ -146,6 +151,7 @@ pub fn build_fallback_urls(original: &str) -> Vec<String> {
 
     if host.eq_ignore_ascii_case("maven.minecraftforge.net") && !path.is_empty() {
         push_fastmcmirror(&mut urls, "https://bmclapi2.bangbang93.com/maven", path);
+        urls.push(format!("https://repo1.maven.org/maven2{}", path));
         if let Some(base) = env_base("LIGHTY_MIRROR_FORGE_MAVEN") {
             urls.push(join_base_and_path(&base, path));
         }
@@ -153,9 +159,11 @@ pub fn build_fallback_urls(original: &str) -> Vec<String> {
 
     if host.eq_ignore_ascii_case("files.minecraftforge.net") && path.starts_with("/maven") {
         push_fastmcmirror(&mut urls, "https://bmclapi2.bangbang93.com", path);
+        urls.push(format!("https://repo1.maven.org/maven2{}", path.trim_start_matches("/maven")));
     }
 
     if host.eq_ignore_ascii_case("maven.neoforged.net") && !path.is_empty() {
+        urls.push(format!("https://repo1.maven.org/maven2{}", path));
         if let Some(base) = env_base("LIGHTY_MIRROR_NEOFORGE_MAVEN") {
             urls.push(join_base_and_path(&base, path));
         }
