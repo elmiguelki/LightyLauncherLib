@@ -14,7 +14,7 @@ use thiserror::Error;
 /// pool, HTTP/2 window scaling, TCP keepalive, and aggressive compression.
 pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MiguelkiNetworkLauncher/0.5.11")
+        .user_agent("MiguelkiNetworkLauncher/0.5.15 (LightyLauncherLib; BMCLAPI)")
         // Connection pooling - balance between performance and OS limits
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(Duration::from_secs(90)))
@@ -51,7 +51,7 @@ pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     /// an already-plain response or a mislabeled body.
     pub static RAW_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MiguelkiNetworkLauncher/0.5.11")
+        .user_agent("MiguelkiNetworkLauncher/0.5.15 (LightyLauncherLib; BMCLAPI)")
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Some(Duration::from_secs(90)))
         .http2_initial_stream_window_size(Some(2 * 1024 * 1024))

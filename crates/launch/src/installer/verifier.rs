@@ -29,6 +29,26 @@ pub async fn needs_download(path: &PathBuf, sha1: Option<&String>, name: &str) -
             let _ = fs::remove_file(path).await;
             return true;
         }
+
+        // Validate JAR/ZIP files have valid magic bytes (PK..) and aren't HTML error pages
+        let path_str = path.to_string_lossy().to_lowercase();
+        if path_str.ends_with(".jar") || path_str.ends_with(".zip") {
+            use tokio::io::AsyncReadExt;
+            if let Ok(mut f) = fs::File::open(path).await {
+                let mut magic = [0u8; 4];
+                if let Ok(n) = f.read(&mut magic).await {
+                    if n < 4 || magic[0] != 0x50 || magic[1] != 0x4B {
+                        lighty_core::trace_warn!(
+                            "[Installer] Corrupt JAR/ZIP (invalid magic bytes or HTML error page) for {}, re-downloading...",
+                            name
+                        );
+                        drop(f);
+                        let _ = fs::remove_file(path).await;
+                        return true;
+                    }
+                }
+            }
+        }
     }
 
     if let Some(hash) = sha1 {

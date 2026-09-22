@@ -145,6 +145,16 @@ async fn download_small_file_once(
     }
     let bytes = resp.bytes().await?;
 
+    let dest_str = dest.to_string_lossy().to_lowercase();
+    if dest_str.ends_with(".jar") || dest_str.ends_with(".zip") {
+        if bytes.len() < 4 || bytes[0] != 0x50 || bytes[1] != 0x4B {
+            return Err(InstallerError::DownloadFailed(format!(
+                "Invalid JAR/ZIP response (magic mismatch or HTML anti-bot page) from {}",
+                url
+            )));
+        }
+    }
+
     // Emit install progress event for the entire file
     #[cfg(feature = "events")]
     if let Some(bus) = event_bus {
