@@ -147,9 +147,20 @@ impl<T: VersionInfo> Arguments for T {
         }
 
         // 1. java.library.path (LWJGL needs it to find natives)
-        if !jvm_args.iter().any(|arg| arg.starts_with("-Djava.library.path=")) {
-            let natives_dir = variables.get(KEY_NATIVES_DIRECTORY).cloned().unwrap_or_default();
-            jvm_args.insert(0, format!("-Djava.library.path={}", natives_dir));
+        //
+        // Always force it to the natives directory itself: the installer
+        // extracts every native flat into that folder, while newer
+        // version.json files (MC 26.3+) point it at a `${natives_directory}/java`
+        // subfolder and rely on LWJGL self-extracting from classpath jars.
+        let natives_dir = variables.get(KEY_NATIVES_DIRECTORY).cloned().unwrap_or_default();
+        let library_path_arg = format!("-Djava.library.path={}", natives_dir);
+        if let Some(existing) = jvm_args
+            .iter_mut()
+            .find(|arg| arg.starts_with("-Djava.library.path="))
+        {
+            *existing = library_path_arg;
+        } else {
+            jvm_args.insert(0, library_path_arg);
         }
 
         // 2. Launcher brand and version (forwarded to the game's about/log strings)
