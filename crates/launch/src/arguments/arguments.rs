@@ -411,9 +411,19 @@ fn apply_jvm_overrides(jvm_args: &mut Vec<String>, jvm_overrides: &HashMap<Strin
     for (key, value) in jvm_overrides {
         let formatted_option = format_jvm_option(key, value);
 
-        // Replace the option if it already exists
+        // Replace the option if it already exists. Match the whole key, not a
+        // bare prefix: `-Dfoo` must not replace `-Dfoo.bar=...`.
         let key_prefix = format!("-{}", key.split('=').next().unwrap_or(key));
-        if let Some(pos) = jvm_args.iter().position(|arg| arg.starts_with(&key_prefix)) {
+        let is_memory_style = key.starts_with('X') && !key.contains(':') && !key.contains('=');
+        let same_option = |arg: &String| match arg.strip_prefix(&key_prefix) {
+            Some("") => true,
+            Some(rest) => {
+                rest.starts_with('=')
+                    || (is_memory_style && rest.starts_with(|c: char| c.is_ascii_digit()))
+            }
+            None => false,
+        };
+        if let Some(pos) = jvm_args.iter().position(same_option) {
             jvm_args[pos] = formatted_option;
         } else {
             // Insert before the classpath flag (-cp) so the classpath stays last

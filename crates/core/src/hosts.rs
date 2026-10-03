@@ -29,8 +29,10 @@ pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .tcp_nodelay(true)
 
-        // Timeouts - prevent stuck connections
-        .timeout(Duration::from_secs(60))
+        // Timeouts - prevent stuck connections. The read timeout only
+        // fires when no data arrives for 60s; a total timeout would abort
+        // any large file (JRE, client jar) on a slow link.
+        .read_timeout(Duration::from_secs(60))
         .connect_timeout(Duration::from_secs(5))
 
         // Compression
@@ -60,7 +62,7 @@ pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .http2_max_frame_size(Some(16 * 1024))
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .tcp_nodelay(true)
-        .timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
         .connect_timeout(Duration::from_secs(5))
         .gzip(false)
         .brotli(false)
