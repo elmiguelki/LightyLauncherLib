@@ -4,7 +4,6 @@ Multi-provider authentication system for Minecraft launchers with OAuth2 and CMS
 
 ## Overview
 
-**Version**: 26.5.1
 **Part of**: [LightyLauncher](https://crates.io/crates/lighty-launcher)
 
 `lighty-auth` provides a unified trait-based authentication system supporting multiple providers:
@@ -15,9 +14,8 @@ Multi-provider authentication system for Minecraft launchers with OAuth2 and CMS
 
 ## Quick Start
 
-```toml
-[dependencies]
-lighty-auth = "26.5.1"
+```bash
+cargo add lighty-auth
 ```
 
 ### Offline Authentication
@@ -43,6 +41,11 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ### Microsoft Authentication
+
+> **Azure AD setup required** — your client ID must also be approved by Mojang
+> before it can call Minecraft Services. Follow the full step-by-step guide with
+> screenshots in
+> [docs/application-id-microsoft.md](./docs/application-id-microsoft.md).
 
 ```rust
 use lighty_auth::{microsoft::MicrosoftAuth, Authenticator};
@@ -97,12 +100,13 @@ async fn main() -> anyhow::Result<()> {
 | [Events](./docs/events.md) | AuthEvent types |
 | [Offline](./docs/offline.md) | Offline mode and UUID generation |
 | [Microsoft](./docs/microsoft.md) | Microsoft OAuth2 flow |
+| [Azure App ID setup](./docs/application-id-microsoft.md) | Step-by-step Azure registration + Mojang approval |
 | [Azuriom](./docs/azuriom.md) | Azuriom CMS authentication |
 | [Trait](./docs/trait.md) | Implementing custom Authenticator |
 
 ## Related Crates
 
-- **[lighty-launcher](../../../README.md)** - Main package
+- **[lighty-launcher](../../README.md)** - Main package
 - **[lighty-event](../event/README.md)** - Event system (for AuthEvent)
 - **[lighty-core](../core/README.md)** - Hash utilities for offline UUID
 - **[lighty-launch](../launch/README.md)** - Uses UserProfile for launching

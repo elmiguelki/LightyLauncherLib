@@ -1,47 +1,70 @@
-# Authenticator Trait
+# `Authenticator` trait
 
-## Overview
+The single abstraction every provider implements. Implement it once for
+your own backend and the rest of the launcher (launch pipeline, event
+bus, examples) treats your provider exactly like the built-in ones.
 
-The `Authenticator` trait is the core interface for all authentication providers in `lighty-auth`. Implement this trait to create custom authentication systems.
+**Export**: `lighty_auth::Authenticator`.
 
-**Export**: `lighty_auth::Authenticator`
-
-## Trait Definition
+## Signature
 
 ```rust
+use std::future::Future;
+use lighty_auth::{AuthError, AuthResult, UserProfile};
+#[cfg(feature = "events")]
+use lighty_event::EventBus;
+
 pub trait Authenticator {
     /// Run the authentication flow and return a fresh profile.
-    /// The `event_bus` parameter only exists when the `events`
-    /// feature is enabled.
     fn authenticate(
         &mut self,
         #[cfg(feature = "events")] event_bus: Option<&EventBus>,
     ) -> impl Future<Output = AuthResult<UserProfile>> + Send;
 
-    /// Check whether an existing access token is still valid.
-    /// Default impl returns `AuthError::Custom("Verification not supported")`.
+    /// Optional: verify an existing access token.
+    /// Default impl returns `AuthError::Custom("…")`.
     fn verify(&self, token: &str)
-        -> impl Future<Output = AuthResult<UserProfile>> + Send { /* default */ }
+        -> impl Future<Output = AuthResult<UserProfile>> + Send { async move {
+            let _ = token;
+            Err(AuthError::Custom("Verification not supported".into()))
+    }}
 
-    /// Invalidate an access token server-side. Default impl is a no-op.
+    /// Optional: invalidate an access token server-side. Default is no-op.
     fn logout(&self, token: &str)
-        -> impl Future<Output = AuthResult<()>> + Send { /* default */ }
+        -> impl Future<Output = AuthResult<()>> + Send { async move {
+            let _ = token;
+            Ok(())
+    }}
 }
 ```
 
-`AuthEvent` variants carry the provider name as a plain `String`
-(`"Microsoft"`, `"Azuriom"`, `"Offline"`, or your own label) — **not**
-the `AuthProvider` enum. The enum is reserved for the `UserProfile`
-return value, where it captures provider-specific data (e.g. the MS
-refresh token).
+A few rules worth keeping in mind:
 
-## Implementing Custom Authenticator
+- `&mut self` lets providers cache state (device codes, polling
+  cursors, refresh tokens) across retries.
+- The `event_bus` parameter only exists when the `events` feature is
+  enabled — gate your emissions with `#[cfg(feature = "events")]`.
+- The token you put in `UserProfile.access_token` **must** be wrapped
+  in `SecretString` — `Debug` and serde rely on this for redaction.
+- `AuthEvent` variants carry `provider: String`, not the
+  `AuthProvider` enum. The enum is reserved for the profile return
+  value (where it captures provider-specific data like the rotating MS
+  refresh token).
 
-A minimal implementation against a hypothetical HTTP backend — closely
-mirroring [`examples/auth/custom.rs`](../../../examples/auth/custom.rs):
+## Minimal implementation
+
+A thin HTTP-backed example — mirrors
+[`examples/auth/custom.rs`](../../../examples/auth/custom.rs):
 
 ```rust
-use lighty_launcher::prelude::*;
+use lighty_auth::{
+    AuthError, AuthProvider, AuthResult, Authenticator,
+    SecretString, UserProfile,
+};
+use serde::Deserialize;
+
+#[cfg(feature = "events")]
+use lighty_event::{AuthEvent, Event, EventBus};
 
 pub struct CustomAuth {
     api_url: String,
@@ -63,8 +86,8 @@ impl CustomAuth {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct CustomAuthResponse {
+#[derive(Deserialize)]
+struct LoginResponse {
     uuid: String,
     username: String,
     access_token: String,
@@ -73,16 +96,16 @@ struct CustomAuthResponse {
 impl Authenticator for CustomAuth {
     async fn authenticate(
         &mut self,
-        event_bus: Option<&EventBus>,
+        #[cfg(feature = "events")] event_bus: Option<&EventBus>,
     ) -> AuthResult<UserProfile> {
+        #[cfg(feature = "events")]
         if let Some(bus) = event_bus {
             bus.emit(Event::Auth(AuthEvent::AuthenticationStarted {
                 provider: "Custom".to_string(),
             }));
         }
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = reqwest::Client::new()
             .post(format!("{}/api/login", self.api_url))
             .json(&serde_json::json!({
                 "username": self.username,
@@ -93,20 +116,15 @@ impl Authenticator for CustomAuth {
             .map_err(|e| AuthError::Custom(e.to_string()))?;
 
         if !resp.status().is_success() {
-            if let Some(bus) = event_bus {
-                bus.emit(Event::Auth(AuthEvent::AuthenticationFailed {
-                    provider: "Custom".to_string(),
-                    error: "Invalid credentials".to_string(),
-                }));
-            }
             return Err(AuthError::InvalidCredentials);
         }
 
-        let body: CustomAuthResponse = resp
+        let body: LoginResponse = resp
             .json()
             .await
             .map_err(|e| AuthError::InvalidResponse(e.to_string()))?;
 
+        #[cfg(feature = "events")]
         if let Some(bus) = event_bus {
             bus.emit(Event::Auth(AuthEvent::AuthenticationSuccess {
                 provider: "Custom".to_string(),
@@ -119,7 +137,10 @@ impl Authenticator for CustomAuth {
             id: None,
             username: body.username,
             uuid: body.uuid,
-            access_token: Some(body.access_token),
+            // Mandatory: wrap the token in `SecretString`.
+            access_token: Some(SecretString::from(body.access_token)),
+            #[cfg(feature = "keyring")]
+            token_handle: None,
             xuid: None,
             email: None,
             email_verified: false,
@@ -130,31 +151,37 @@ impl Authenticator for CustomAuth {
         })
     }
 }
-
 ```
 
-## Usage
+Custom providers that want OS-keychain routing can mirror the
+`with_keyring(service: impl Into<String>)` builder used by
+`MicrosoftAuth` / `AzuriomAuth` and route the token through
+[`TokenHandle`](./exports.md#os-keychain-feature-keyring) (gated
+behind `#[cfg(feature = "keyring")]`).
+
+## Using your provider
+
+Once `Authenticator` is implemented, the rest is mechanical:
 
 ```rust
-use lighty_launcher::prelude::*;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut auth = CustomAuth::new(
-        "https://api.example.com",
-        "alice",
-        "hunter2",
-    );
-
-    // With events: pass Some(&event_bus); without, pass None.
-    let profile = auth.authenticate(None).await?;
-    println!("Authenticated: {}", profile.username);
-    Ok(())
-}
+# use lighty_auth::Authenticator;
+# struct CustomAuth;
+# impl CustomAuth { fn new(_: &str, _: &str, _: &str) -> Self { Self } }
+# impl Authenticator for CustomAuth { async fn authenticate(&mut self,
+#     #[cfg(feature = "events")] _: Option<&lighty_event::EventBus>)
+#     -> lighty_auth::AuthResult<lighty_auth::UserProfile>
+# { unimplemented!() } }
+# async fn run() -> anyhow::Result<()> {
+let mut auth = CustomAuth::new("https://api.example.com", "alice", "hunter2");
+let profile = auth.authenticate(
+    #[cfg(feature = "events")] None,
+).await?;
+println!("Authenticated: {}", profile.username);
+# Ok(()) }
 ```
 
-## Related Documentation
+## Related
 
-- [How to Use](./how-to-use.md) - Examples of using built-in authenticators
-- [Events](./events.md) - AuthEvent types to emit
-- [Exports](./exports.md) - All exported types
+- [How to use](./how-to-use.md) — patterns for built-in providers
+- [Events](./events.md) — `AuthEvent` variants to emit
+- [Exports](./exports.md) — full type list

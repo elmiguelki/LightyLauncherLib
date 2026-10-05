@@ -1,233 +1,24 @@
 # Exports
 
-## Overview
+Public surface of the `lighty-launch` crate.
 
-Complete reference of all exports from `lighty-launch` and their re-exports in `lighty-launcher`.
-
-## In `lighty_launch`
-
-### Launch System
-
-```rust
-use lighty_launch::{
-    LaunchBuilder,    // Builder for launching instances
-    LaunchConfig,     // Launch configuration
-};
-```
-
-### Traits
-
-```rust
-use lighty_launch::{
-    InstanceControl,  // MUST import to use instance management methods
-    Installer,        // Asset/library installation
-};
-```
-
-### Instance Management
-
-```rust
-use lighty_launch::instance::{
-    InstanceControl,
-    InstanceError,
-    InstanceResult,
-};
-```
-
-### Installer
-
-```rust
-use lighty_launch::installer::{
-    Installer,
-    // Internal modules (not typically used directly):
-    // assets, libraries, natives, mods, client, config
-};
-```
-
-### Arguments
-
-```rust
-use lighty_launch::arguments::Arguments;
-```
-
-### Errors
-
-```rust
-use lighty_launch::errors::{
-    InstallerError,
-    InstallerResult,
-    InstanceError,
-    InstanceResult,
-};
-```
-
-## In `lighty_launcher` (Re-exports)
-
-```rust
-use lighty_launcher::launch::{
-    // Launch
-    LaunchBuilder,
-    LaunchConfig,
-
-    // Traits
-    InstanceControl,
-    Installer,
-
-    // Errors
-    errors::{
-        InstallerError,
-        InstallerResult,
-        InstanceError,
-        InstanceResult,
-    },
-
-    // Arguments
-    arguments::Arguments,
-};
-```
-
-## Usage Patterns
-
-### Pattern 1: Direct Crate Import
-
-```rust
-use lighty_launch::{LaunchBuilder, InstanceControl};
-use lighty_core::AppState;
-use lighty_launcher::prelude::*;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    AppState::init("MyLauncher")?;
-
-    let mut instance = VersionBuilder::new(
-        "test",
-        Loader::Vanilla,
-        "",
-        "1.21.1",
-    );
-
-    let mut auth = OfflineAuth::new("Player");
-
-    #[cfg(not(feature = "events"))]
-    let profile = auth.authenticate().await?;
-
-    instance.launch(&profile, JavaDistribution::Temurin)
-        .run()
-        .await?;
-
-    Ok(())
-}
-```
-
-### Pattern 2: Via Main Launcher Crate
-
-```rust
-use lighty_launcher::{
-    prelude::*,
-    launch::InstanceControl,
-};
-
-// Use methods from InstanceControl trait
-if let Some(pid) = instance.get_pid() {
-    println!("Running: {}", pid);
-}
-```
-
-### Pattern 3: Prelude
-
-```rust
-use lighty_launcher::prelude::*;
-use lighty_launch::InstanceControl; // Still need to import trait explicitly
-
-// VersionBuilder is in prelude, but InstanceControl must be imported
-let mut instance = VersionBuilder::new(/*...*/);
-instance.launch(&profile, JavaDistribution::Temurin).run().await?;
-```
-
-## Type Details
-
-### LaunchBuilder
-
-```rust
-pub struct LaunchBuilder<'a, V: VersionInfo> {
-    // ...
-}
-
-impl<'a, V: VersionInfo> LaunchBuilder<'a, V> {
-    pub fn with_jvm_options(self) -> JvmOptionsBuilder<'a, V>;
-    pub fn with_game_options(self) -> GameOptionsBuilder<'a, V>;
-    pub async fn run(self) -> InstallerResult<()>;
-}
-```
-
-### InstanceControl Trait
-
-```rust
-pub trait InstanceControl: VersionInfo {
-    fn get_pid(&self) -> Option<u32>;
-    fn get_pids(&self) -> Vec<u32>;
-    async fn close_instance(&self, pid: u32) -> InstanceResult<()>;
-    async fn delete_instance(&self) -> InstanceResult<()>;
-    fn size_of_instance(&self, version: &Version) -> InstanceSize;
-}
-```
-
-**IMPORTANT**: This trait is automatically implemented for any type implementing `VersionInfo`, but you **MUST import the trait** to use its methods:
-
-```rust
-use lighty_launch::InstanceControl; // Required!
-```
-
-### InstallerError
-
-```rust
-pub enum InstallerError {
-    DownloadFailed(String),
-    VerificationFailed(String),
-    ExtractionFailed(String),
-    IOError(std::io::Error),
-    // ...
-}
-```
-
-### InstanceError
-
-```rust
-pub enum InstanceError {
-    InstanceRunning,
-    InstanceNotFound,
-    ProcessKillFailed,
-    // ...
-}
-```
-
-## Module Structure
+## Module layout
 
 ```
 lighty_launch
 ├── launch
-│   ├── LaunchBuilder
-│   ├── LaunchConfig
-│   ├── builder (internal)
-│   ├── runner (internal)
-│   └── config (internal)
+│   ├── Launch              (trait — adds .launch(profile, java))
+│   └── LaunchBuilder
 ├── installer
-│   ├── Installer (trait)
-│   ├── assets (internal)
-│   ├── libraries (internal)
-│   ├── natives (internal)
-│   ├── mods (internal)
-│   ├── client (internal)
-│   └── config (internal)
+│   └── Installer           (trait — async fn install(&self, &Version, …))
 ├── instance
-│   ├── InstanceControl (trait)
+│   ├── InstanceControl     (trait — also re-exported at the crate root)
 │   ├── InstanceError
-│   ├── InstanceResult
-│   ├── manager (internal)
-│   ├── utilities (internal)
-│   └── console (internal)
+│   └── InstanceResult
 ├── arguments
-│   └── Arguments
+│   ├── Arguments           (trait)
+│   ├── KEY_*               (placeholder key constants — see arguments.md)
+│   └── …
 └── errors
     ├── InstallerError
     ├── InstallerResult
@@ -235,76 +26,169 @@ lighty_launch
     └── InstanceResult
 ```
 
-## Error Handling
-
-### Installer Errors
+## Crate root re-exports
 
 ```rust
+use lighty_launch::{
+    LaunchBuilder,
+    Installer,
+    InstanceControl,
+    InstanceError,
+    InstanceResult,
+};
+```
+
+`InstanceControl` lives under `lighty_launch::instance::InstanceControl`
+and is re-exported at the root for convenience — **import the trait**
+to use its methods (`get_pid`, `close_instance`, `delete_instance`,
+`size_of_instance`).
+
+## Per-module imports
+
+```rust
+// The fluent .launch().run() entry point.
+use lighty_launch::launch::{Launch, LaunchBuilder};
+
+// The install pipeline trait.
+use lighty_launch::installer::Installer;
+
+// The instance management trait + errors.
+use lighty_launch::instance::{InstanceControl, InstanceError, InstanceResult};
+
+// The argv builder trait + placeholder key constants.
+use lighty_launch::arguments::{Arguments, KEY_LAUNCHER_NAME, KEY_GAME_DIRECTORY};
+
+// Pipeline-wide errors.
 use lighty_launch::errors::{InstallerError, InstallerResult};
-
-match instance.launch(&profile, JavaDistribution::Temurin).run().await {
-    Ok(_) => println!("Launched"),
-    Err(InstallerError::DownloadFailed(url)) => {
-        eprintln!("Download failed: {}", url);
-    }
-    Err(InstallerError::VerificationFailed(file)) => {
-        eprintln!("Verification failed: {}", file);
-    }
-    Err(e) => {
-        eprintln!("Launch error: {}", e);
-    }
-}
 ```
 
-### Instance Errors
+## Public types — at a glance
+
+### `LaunchBuilder<'a, T>`
 
 ```rust
-use lighty_launch::errors::{InstanceError, InstanceResult};
-use lighty_launch::InstanceControl;
-
-match instance.delete_instance().await {
-    Ok(_) => println!("Deleted"),
-    Err(InstanceError::InstanceRunning) => {
-        eprintln!("Cannot delete: instance is running");
-    }
-    Err(InstanceError::InstanceNotFound) => {
-        eprintln!("Instance not found");
-    }
-    Err(e) => {
-        eprintln!("Error: {}", e);
-    }
-}
-```
-
-## Feature-Gated Exports
-
-### Events Feature
-
-```toml
-[dependencies]
-lighty-launch = { version = "26.5.1", features = ["events"] }
-```
-
-When `events` feature is enabled:
-- `LaunchEvent` types are emitted (from `lighty-event`)
-- Console output is streamed via events
-- Instance lifecycle events are emitted
-
-```rust
-#[cfg(feature = "events")]
-use lighty_event::{EventBus, Event, LaunchEvent};
-
-#[cfg(feature = "events")]
+impl<'a, T> LaunchBuilder<'a, T>
+where T: VersionInfo<LoaderType = Loader> + LoaderExtensions + Arguments + Installer + WithMods
 {
-    let event_bus = EventBus::new(1000);
-    // Events are automatically emitted during launch
-    instance.launch(&profile, JavaDistribution::Temurin).run().await?;
+    pub fn with_jvm_options(self) -> JvmOptionsBuilder<'a, T>;
+    pub fn with_arguments  (self) -> ArgumentsBuilder<'a, T>;
+
+    #[cfg(feature = "events")]
+    pub fn with_event_bus(self, bus: &'a EventBus) -> Self;
+
+    pub async fn run(self) -> InstallerResult<()>;
 }
 ```
 
-## Related Documentation
+Full API and overrides reference: [arguments.md](./arguments.md).
 
-- [How to Use](./how-to-use.md) - Practical usage examples
-- [Events](./events.md) - LaunchEvent types
-- [Overview](./overview.md) - Architecture overview
-- [Instance Control](./instance-control.md) - Detailed instance management
+### `Launch` trait
+
+Blanket-implemented for every type that satisfies the pipeline's
+bounds. Full doc: [launch.md](./launch.md#the-launch-trait).
+
+### `Installer` trait
+
+```rust
+pub trait Installer {
+    fn install(
+        &self,
+        builder: &Version,
+        #[cfg(feature = "events")] event_bus: Option<&EventBus>,
+    ) -> impl Future<Output = InstallerResult<()>> + Send;
+}
+```
+
+Auto-implemented for `T: VersionInfo<LoaderType = Loader> + WithMods`.
+Detail: [installation.md](./installation.md).
+
+### `Arguments` trait
+
+```rust
+pub trait Arguments {
+    fn build_arguments(
+        &self,
+        builder: &Version,
+        profile: Option<&UserProfile>,
+        arg_overrides:  &HashMap<String, String>,
+        arg_removals:   &HashSet<String>,
+        jvm_overrides:  &HashMap<String, String>,
+        jvm_removals:   &HashSet<String>,
+        raw_args:       &[String],
+    ) -> Vec<String>;
+}
+```
+
+Auto-implemented for every `VersionInfo`. Detail:
+[arguments.md](./arguments.md).
+
+### `InstanceControl` trait
+
+```rust
+pub trait InstanceControl: VersionInfo {
+    fn get_pid (&self) -> Option<u32>;
+    fn get_pids(&self) -> Vec<u32>;
+    async fn close_instance (&self, pid: u32) -> InstanceResult<()>;
+    async fn delete_instance(&self)           -> InstanceResult<()>;
+    fn size_of_instance(&self, version: &Version) -> InstanceSize;
+}
+```
+
+Detail: [instance-control.md](./instance-control.md) (API),
+[instance-lifecycle.md](./instance-lifecycle.md) (state machine).
+
+### Errors
+
+```rust
+pub enum InstallerError {
+    HttpStatus       { status: u16, url: String },
+    Sha1Mismatch     { url: String, expected: String, actual: String },
+    StalePartialFile { url: String },
+    RetriesExhausted { attempts: u32, url: String },
+    ConcurrencyClosed,
+    InvalidMetadata,
+    NoPid,
+    Io(std::io::Error),
+    // …
+}
+
+pub enum InstanceError {
+    NotFound      { pid: u32 },
+    StillRunning  { instance_name: String, pids: Vec<u32> },
+    Io            (std::io::Error),
+    DuplicatePid  { pid: u32, existing_instance: String },
+    KillFailed    { pid: u32, reason: String },
+}
+```
+
+`InstallerResult<T>` and `InstanceResult<T>` are the matching type
+aliases.
+
+### Placeholder key constants
+
+The `lighty_launch::arguments` module exposes one `KEY_*` constant per
+launch placeholder (`KEY_LAUNCHER_NAME`, `KEY_GAME_DIRECTORY`,
+`KEY_AUTH_PLAYER_NAME`, …) so `.set(...)` calls aren't stringly typed.
+Full table: [arguments.md → placeholder key constants](./arguments.md#placeholder-key-constants).
+
+## Cargo features
+
+| Feature | Adds |
+|---|---|
+| `events` | `LaunchEvent` + `ModloaderEvent` emission, `with_event_bus(...)` on `LaunchBuilder`, console streamed via events |
+| `keyring` | Lets the argv builder read `--accessToken` from a `TokenHandle`. Forwards to `lighty-auth/keyring`. |
+| `forge` | Forge install processors (1.13+) **and** legacy 1.7.10 – 1.12.2 universal-JAR extraction. Single switch for both eras. |
+| `neoforge` | NeoForge install processors |
+| `fabric`, `quilt` | Loader support (no extra install step) |
+| `modrinth`, `curseforge` | User-mod resolver + matching modpack format parser |
+| `tracing` | Provider-level `tracing` logs |
+
+Enable from the umbrella crate (e.g. `lighty-launcher/keyring`) for
+forwarded activation across `lighty-launch` and `lighty-auth`.
+
+## Related
+
+- [Overview](./overview.md), [How to use](./how-to-use.md)
+- [Launch](./launch.md), [Installation](./installation.md)
+- [Instance control](./instance-control.md), [Instance lifecycle](./instance-lifecycle.md)
+- [Arguments](./arguments.md), [Events](./events.md)

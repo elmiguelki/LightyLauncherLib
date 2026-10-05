@@ -1,34 +1,20 @@
-/*
- * This file is part of LiquidLauncher (https://github.com/CCBlueX/LiquidLauncher)
- *
- * Copyright (c) 2015 - 2024 CCBlueX
- *
- * LiquidLauncher is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * LiquidLauncher is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with LiquidLauncher. If not, see <https://www.gnu.org/licenses/>.
- */
+// Copyright (c) 2025 Hamadi
+// Licensed under the MIT License
+
+//! HTTP download helpers built on top of the shared `HTTP_CLIENT`.
 
 use std::path::Path;
 
-use crate::errors::{DownloadResult, DownloadError};
-use crate::{trace_debug};
 use tokio::fs;
-use crate::hosts::{HTTP_CLIENT, RAW_HTTP_CLIENT, build_fallback_urls};
+use tokio::io::AsyncWriteExt;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
 
-/// Downloads `url` to `path` without progress reporting.
-///
-/// Used for small one-shot fetches where streaming and progress callbacks
-/// would be overkill (e.g. mod-loader installer JARs, single manifests).
+use crate::errors::{DownloadError, DownloadResult};
+use crate::hosts::{HTTP_CLIENT, RAW_HTTP_CLIENT, build_fallback_urls};
+use crate::trace_debug;
+
+/// Streams `url` to `path` chunk by chunk. No progress callback —
+/// reserved for small artefacts (modpack archives, single mod files).
 pub async fn download_file_untracked(url: &str, path: impl AsRef<Path>) -> DownloadResult<()> {
     let path = path.as_ref().to_owned();
     let mut last_error = None;
@@ -77,34 +63,34 @@ async fn download_untracked_once(
     url: &str,
     path: &Path,
 ) -> DownloadResult<()> {
-    let response = client
+    let mut response = client
         .get(url)
         .header(ACCEPT_ENCODING, "identity")
         .send()
         .await?
         .error_for_status()?;
 
-    let content = response.bytes().await?;
-
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
 
-    fs::write(path, content).await?;
+    let mut file = fs::File::create(path).await?;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
     Ok(())
 }
 
-/// Downloads `url` into a `Vec<u8>`, invoking `on_progress(current, total)`
-/// after each chunk.
-///
-/// `total` is taken from `Content-Length` and is `0` when the server does
-/// not announce one. The function returns the complete body once the
-/// response stream ends.
+/// Downloads `url` into an in-memory buffer and reports progress after
+/// every chunk via `on_progress(downloaded_bytes, total_bytes)`. The
+/// total is `0` when the server doesn't expose `Content-Length`.
 pub async fn download_file<F>(url: &str, on_progress: F) -> DownloadResult<Vec<u8>>
 where
     F: Fn(u64, u64),
 {
-    trace_debug!("Downloading file {:?}", url);
+    let trimmed = url.trim();
+    trace_debug!("Downloading {trimmed}");
 
     let mut last_error = None;
 

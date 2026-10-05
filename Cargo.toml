@@ -6,19 +6,23 @@ members = [
     "crates/java",
     "crates/launch",
     "crates/loaders",
+    "crates/modsloader",
     "crates/version",
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+unexpected_cfgs = "deny"
+
 [workspace.package]
-version = "26.5.1"
-edition = "2021"
+version = "26.9.3"
+edition = "2024"
 authors = ["Hamadi <dev.hamadipro@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/Lighty-Launcher/LightyLauncherLib"
 homepage = "https://github.com/Lighty-Launcher/LightyLauncherLib"
 documentation = "https://docs.rs/lighty-launcher"
-rust-version = "1.75"
+rust-version = "1.98"
 
 [package]
 name = "lighty-launcher"
@@ -34,6 +38,12 @@ description = "A modern minecraft launcher library supporting multiple mod loade
 readme = "README.md"
 keywords = ["minecraft", "launcher", "fabric", "forge", "neoforge"]
 categories = ["command-line-utilities", "development-tools", "games", "api-bindings"]
+# Exclude the demo video — embedded in the README via GitHub
+# user-attachments URL, no need to ship it inside the crate.
+exclude = ["assets/exemple_launcher_with_lightylauncherlib.mp4"]
+
+[lints]
+workspace = true
 
 [lib]
 name = "lighty_launcher"
@@ -45,13 +55,14 @@ path = "src/lib.rs"
 
 [workspace.dependencies]
 # Internal crates
-lighty-core = { version = "26.5.1", path = "crates/core" }
-lighty-auth = { version = "26.5.1", path = "crates/auth" }
-lighty-event = { version = "26.5.1", path = "crates/event" }
-lighty-java = { version = "26.5.1", path = "crates/java" }
-lighty-launch = { version = "26.5.1", path = "crates/launch" }
-lighty-loaders = { version = "26.5.1", path = "crates/loaders" }
-lighty-version = { version = "26.5.1", path = "crates/version" }
+lighty-core = { version = "26.9.3", path = "crates/core" }
+lighty-auth = { version = "26.9.3", path = "crates/auth" }
+lighty-event = { version = "26.9.3", path = "crates/event" }
+lighty-java = { version = "26.9.3", path = "crates/java" }
+lighty-launch = { version = "26.9.3", path = "crates/launch" }
+lighty-loaders = { version = "26.9.3", path = "crates/loaders" }
+lighty-modsloader = { version = "26.9.3", path = "crates/modsloader" }
+lighty-version = { version = "26.9.3", path = "crates/version" }
 
 # ---- Async Runtime ----
 tokio = { version = "1.52", features = [
@@ -89,6 +100,10 @@ futures = "0.3.32"
 futures-util = { version = "0.3.32", features = ["io", "async-await-macro"] }
 async-trait = "0.1.89"
 
+# ---- Secrets ----
+# Wraps auth tokens to disable accidental Debug/Serialize leaks. See AUTH_SECRETS.md.
+secrecy = { version = "0.10" }
+
 # ---- Error Handling ----
 thiserror = "2.0.18"
 anyhow = "1.0.102"
@@ -98,24 +113,24 @@ tracing = { version = "0.1.44", features = ["log"] }
 # ---- Filesystem & Compression ----
 tokio-tar = "0.3.1"
 async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
-zip = "6.0.0"
-async_zip = { version = "0.0.18", features = ["deflate", "tokio", "tokio-fs"] }
+zip = "8.6.0"
+async_zip = { version = "0.0.19", features = ["deflate", "tokio", "tokio-fs"] }
 memmap2 = "0.9.10"
 
 # ---- Cryptography ----
 sha1 = "0.11.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
-base64 = "0.22"
+base64 = "0.23"
 
 # ---- Paths & Filenames ----
 # `dirs` instead of `directories`: same author/std but the API only
 # exposes the platform-canonical bases (data/config/cache/home), no
 # qualifier+organization+application triplet. We join the launcher
 # name ourselves — see `crates/core/src/app_state.rs`.
-dirs = "6.0.0"
+dirs = "7.0.0"
 sanitize-filename = "0.6.0"
-path-absolutize = "3.1.1"
+path-absolutize = "4.0.1"
 
 # ---- System & OS ----
 os_info = "3.14"
@@ -134,7 +149,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # keychain (Linux Secret Service / macOS Keychain / Windows Credential Manager).
 # Examples-only — the lib itself does NOT depend on keyring (storage
 # policy is intentionally left to the consumer).
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+keyring = { version = "4.2", features = ["apple-native-keyring-store", "windows-native-keyring-store", "dbus-secret-service-keyring-store"] }
 
 # ============================================
 # MAIN PACKAGE DEPENDENCIES
@@ -148,6 +163,7 @@ lighty-event = { workspace = true, optional = true }
 lighty-java = { workspace = true }
 lighty-launch = { workspace = true }
 lighty-loaders = { workspace = true }
+lighty-modsloader = { workspace = true }
 lighty-version = { workspace = true }
 
 # Required for examples
@@ -175,45 +191,35 @@ reqwest = { workspace = true }
 # ============================================
 
 [features]
-# Loaders (forwarded to lighty-loaders)
-vanilla = ["lighty-loaders/vanilla"]
-fabric = ["lighty-loaders/fabric"]
-quilt = ["lighty-loaders/quilt"]
-# lighty-launch is enabled so the installer can run NeoForge post-install processors
-neoforge = ["lighty-loaders/neoforge", "lighty-launch/neoforge"]
-# lighty-launch is enabled so the installer can run Forge post-install
-# processors. The same feature flag also covers legacy Forge (1.5.2 →
-# 1.12.2) since the legacy parser lives inside the same crate path.
-forge = ["lighty-loaders/forge", "lighty-launch/forge"]
+default = []
+
+# Loaders
+vanilla        = ["lighty-loaders/vanilla"]
+fabric         = ["lighty-loaders/fabric"]
+quilt          = ["lighty-loaders/quilt"]
+neoforge       = ["lighty-loaders/neoforge", "lighty-launch/neoforge"]
+forge          = ["lighty-loaders/forge", "lighty-launch/forge"]
 lighty_updater = ["lighty-loaders/lighty_updater"]
-# Mod sources (Modrinth public API, CurseForge keyed API).
-# Each forwards into:
-#   - lighty-loaders: API clients + resolver
-#   - lighty-launch:  runner-side mod_resolver (event-aware bridge)
-#   - lighty-version: matching .with_modrinth() / .with_curseforge() methods
-modrinth = ["lighty-loaders/modrinth", "lighty-launch/modrinth", "lighty-version/modrinth"]
-curseforge = ["lighty-loaders/curseforge", "lighty-launch/curseforge", "lighty-version/curseforge"]
-all-mods = ["modrinth", "curseforge"]
-all-loaders = [
+all-loaders    = [
     "lighty-loaders/all-loaders",
     "lighty-launch/modrinth", "lighty-launch/curseforge",
     "lighty-version/modrinth", "lighty-version/curseforge",
 ]
 
-# Event system
-events = ["lighty-event", "lighty-auth/events", "lighty-launch/events"]
+# Mod sources (modpacks ride on each provider)
+modrinth   = ["lighty-modsloader/modrinth",   "lighty-launch/modrinth",   "lighty-version/modrinth"]
+curseforge = ["lighty-modsloader/curseforge", "lighty-launch/curseforge", "lighty-version/curseforge"]
+all-mods   = ["modrinth", "curseforge"]
 
-# Logging
+# Cross-cutting
+events  = ["lighty-event", "lighty-auth/events", "lighty-launch/events"]
+keyring = ["lighty-auth/keyring", "lighty-launch/keyring"]
 tracing = [
     "dep:tracing",
-    "lighty-core/tracing",
-    "lighty-auth/tracing",
-    "lighty-java/tracing",
-    "lighty-launch/tracing",
-    "lighty-loaders/tracing",
+    "lighty-core/tracing", "lighty-auth/tracing", "lighty-java/tracing",
+    "lighty-launch/tracing", "lighty-loaders/tracing",
+    "lighty-modsloader/tracing", "lighty-version/tracing",
 ]
-
-default = []
 
 # ============================================
 # COMPILATION PROFILES
@@ -287,6 +293,23 @@ required-features = ["modrinth", "fabric", "tracing"]
 name = "curseforge"
 path = "examples/mods/curseforge.rs"
 required-features = ["curseforge", "fabric", "tracing"]
+
+# --- Modpacks (Modrinth .mrpack, CurseForge .zip), under examples/modpacks/ ---
+
+[[example]]
+name = "modpack_modrinth_url"
+path = "examples/modpacks/modrinth_url.rs"
+required-features = ["modrinth", "fabric", "events", "tracing"]
+
+[[example]]
+name = "modpack_modrinth_pinned"
+path = "examples/modpacks/modrinth_pinned.rs"
+required-features = ["modrinth", "fabric", "events", "tracing"]
+
+[[example]]
+name = "modpack_curseforge"
+path = "examples/modpacks/curseforge.rs"
+required-features = ["curseforge", "forge", "events", "tracing"]
 
 # --- Full event-bus showcase, under examples/with_events/ ---
 

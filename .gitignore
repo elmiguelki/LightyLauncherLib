@@ -3,18 +3,16 @@
 
 # Allow folders
 !src/
+!.github/
 !.github/**
 !crates/
-!img/
 !examples/
-!docs/
+!assets/
 
 # Allow root files
-!LICENCE
+!LICENSE
 !README.md
+!CONTRIBUTING.md
 !Cargo.toml
 !Cargo.lock
 !.gitignore
-
-
-

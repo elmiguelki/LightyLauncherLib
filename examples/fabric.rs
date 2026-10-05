@@ -15,3 +15,26 @@ async fn main() -> anyhow::Result<()> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
+    AppState::init("LightyLauncher")?;
+
+    // Authenticate
+    let mut auth = OfflineAuth::new("Hamadi");
+    #[cfg(feature = "events")]
+    let profile = auth.authenticate(None).await?;
+    #[cfg(not(feature = "events"))]
+    let profile = auth.authenticate().await?;
+
+    let mut fabric = VersionBuilder::new("fabric-26.1.2", Loader::Fabric, "0.19.2", "26.1.2");
+
+    fabric
+        .launch(&profile, JavaDistribution::Zulu)
+        .with_arguments()
+        .set(KEY_GAME_DIRECTORY, "runtime") //better folder organization
+        .done()
+        .run()
+        .await?;
+
+    trace_info!("Fabric launch successful!");
+
+    Ok(())
+}

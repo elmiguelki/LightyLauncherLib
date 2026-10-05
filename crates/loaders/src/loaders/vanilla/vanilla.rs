@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use lighty_core::{mkdir, verify_file_sha1};
 use lighty_core::system::{ARCHITECTURE, OS};
-use crate::utils::error::QueryError;
+use lighty_core::QueryError;
 use crate::utils::manifest::ManifestRepository;
 use crate::utils::query::Query;
 use super::vanilla_metadata::{PistonMetaManifest, VanillaAssetFile,VanillaMetaData,Rule};
@@ -31,23 +31,14 @@ pub static VANILLA: Lazy<ManifestRepository<VanillaQuery>> = Lazy::new(|| Manife
 /// Sub-queries supported by the Vanilla loader.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VanillaQuery {
-    /// Required Java major version (e.g. `8`, `17`, `21`).
     JavaVersion,
-    /// Main class to launch (typically `net.minecraft.client.main.Main`).
     MainClass,
-    /// Runtime library list.
     Libraries,
-    /// OS/arch-filtered native library list (resolves classic and 1.19+ formats).
     Natives,
-    /// Asset index descriptor (id, URL, SHA1, size).
     AssetsIndex,
-    /// Materialized assets file (downloads and caches the index).
     Assets,
-    /// Client JAR descriptor.
     Client,
-    /// Game and JVM argument lists (handles both legacy and modern formats).
     Arguments,
-    /// Full [`Version`] payload assembled from every sub-query.
     VanillaBuilder,
 }
 
@@ -60,19 +51,6 @@ impl Query for VanillaQuery {
     fn name() -> &'static str {
         "vanilla"
     }
-    //OPTIONNEL FAIT UNE IMPLEMENTATION POUR LE TTL SUR LE CACHE
-    // fn cache_ttl() -> Duration {
-    //     Duration::from_secs(10 * 60)
-    // }
-    //
-    // fn cache_ttl_for_query(query: &Self::Query) -> Duration {
-    //     match query {
-    //         VanillaQuery::Libraries => Duration::from_secs(10 * 60),
-    //         VanillaQuery::Assets => Duration::from_secs(5 * 60),
-    //         VanillaQuery::Client => Duration::from_secs(3600),
-    //         _ => Duration::from_secs(1800),
-    //     }
-    // }
 
     async fn fetch_full_data<V: VersionInfo>(version: &V) -> Result<VanillaMetaData> {
         let prism_url = prism_meta_url("net.minecraft", version.minecraft_version());
@@ -131,7 +109,6 @@ impl Query for VanillaQuery {
     }
 }
 
-/// --------- Libraries ----------
 fn extract_libraries(full_data: &VanillaMetaData) -> Vec<Library> {
     full_data.libraries
         .iter()
@@ -148,7 +125,6 @@ fn extract_libraries(full_data: &VanillaMetaData) -> Vec<Library> {
         .collect()
 }
 
-/// --------- Natives ----------
 fn extract_natives(full_data: &VanillaMetaData) -> Result<Vec<Native>> {
     let os_name = OS.get_vanilla_os()
         .map_err(|_| QueryError::Conversion {
@@ -187,7 +163,7 @@ fn extract_natives(full_data: &VanillaMetaData) -> Result<Vec<Native>> {
     let natives = full_data.libraries
         .iter()
         .filter_map(|lib| {
-            // Case 1: new format (natives-{os}{arch})
+            // New format: `:natives-{os}{arch}` classifier.
             if lib.name.contains(":natives-") {
                 for os in &os_names {
                     for arch in &arch_suffixes {
@@ -212,7 +188,7 @@ fn extract_natives(full_data: &VanillaMetaData) -> Result<Vec<Native>> {
                 }
             }
 
-            // Case 2: legacy format (classifiers map)
+            // Legacy format: classifiers map.
             if let Some(natives_map) = &lib.natives {
                 if let Some(classifiers) = &lib.downloads.classifiers {
                     if let Some(rules) = &lib.rules {
@@ -221,7 +197,6 @@ fn extract_natives(full_data: &VanillaMetaData) -> Result<Vec<Native>> {
                         }
                     }
 
-                    // Try all OS name variants
                     for os in &os_names {
                         if let Some(classifier_pattern) = natives_map.get(*os) {
                             let classifier_name = classifier_pattern.replace("${arch}", arch_bits);
@@ -264,26 +239,22 @@ pub(crate) fn should_apply_rules(rules: &[Rule], os_name: &str) -> bool {
     allowed
 }
 
-/// --------- Java Version ----------
 fn extract_java_version(full_data: &VanillaMetaData) -> JavaVersion {
     full_data.java_version
         .as_ref()
         .map(|v| JavaVersion { major_version: v.major_version as u8 })
         .unwrap_or_else(|| {
-            // For very old Minecraft versions (<1.17), java_version is not specified
-            // Default to Java 8 which is compatible with legacy versions
+            // MC < 1.17 doesn't carry java_version; default to 8.
             JavaVersion { major_version: 8 }
         })
 }
 
-/// --------- Main Class ----------
-fn extract_main_class(full_data: &VanillaMetaData) -> MainClass {
+pub(crate) fn extract_main_class(full_data: &VanillaMetaData) -> MainClass {
     MainClass {
         main_class: full_data.main_class.clone(),
     }
 }
 
-/// --------- Assets ----------
 fn extract_assets_index(full_data: &VanillaMetaData) -> AssetIndex {
     AssetIndex {
         id: full_data.asset_index.id.clone(),
@@ -297,14 +268,11 @@ fn extract_assets_index(full_data: &VanillaMetaData) -> AssetIndex {
 async fn extract_assets<V: VersionInfo>(version: &V, full_data: &VanillaMetaData) -> Result<AssetsFile> {
     let asset_index = &full_data.asset_index;
 
-    // Create assets/indexes directory
     let indexes_dir = version.game_dirs().join("assets").join("indexes");
     mkdir!(indexes_dir);
 
-    // Index file path (e.g. assets/indexes/1.7.10.json or 26.json)
     let index_file_path = indexes_dir.join(format!("{}.json", asset_index.id));
 
-    // Skip download if the file is present and SHA1 matches
     let needs_download = if index_file_path.exists() {
         match verify_file_sha1(&index_file_path, &asset_index.sha1).await {
             Ok(true) => {
@@ -321,7 +289,6 @@ async fn extract_assets<V: VersionInfo>(version: &V, full_data: &VanillaMetaData
         true
     };
 
-    // Download if needed
     if needs_download {
         lighty_core::trace_info!("[Assets] Downloading index {} from {}", asset_index.id, asset_index.url);
 
@@ -356,7 +323,6 @@ async fn extract_assets<V: VersionInfo>(version: &V, full_data: &VanillaMetaData
     let index_content = tokio::fs::read_to_string(&index_file_path).await?;
     let vanilla_assets: VanillaAssetFile = serde_json::from_str(&index_content)?;
 
-    // Build the AssetsFile, materializing each object's CDN URL
     let objects = vanilla_assets.objects
         .into_iter()
         .map(|(k, v)| {
@@ -370,6 +336,7 @@ async fn extract_assets<V: VersionInfo>(version: &V, full_data: &VanillaMetaData
                 hash: v.hash,
                 size: v.size,
                 url,
+                path: None,
             })
         })
         .collect();
@@ -392,8 +359,7 @@ fn extract_client<V: VersionInfo>(version: &V, full_data: &VanillaMetaData) -> R
         })
 }
 
-/// --------- Arguments ----------
-fn extract_arguments(full_data: &VanillaMetaData) -> Arguments {
+pub(crate) fn extract_arguments(full_data: &VanillaMetaData) -> Arguments {
     if let Some(args) = &full_data.arguments {
         Arguments {
             game: args.game

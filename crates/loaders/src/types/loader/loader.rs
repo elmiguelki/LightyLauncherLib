@@ -1,21 +1,29 @@
 /// The supported Minecraft mod loaders.
-///
-/// Selects which manifest source and merge strategy the launcher uses
-/// when fetching metadata for an instance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Loader {
-    /// Fabric — modern, lightweight modding API.
     Fabric,
-    /// NeoForge — community fork of Forge for MC 1.20.2+.
     NeoForge,
-    /// OptiFine — graphics enhancement (not yet implemented).
     Optifine,
-    /// Quilt — Fabric-compatible modding API.
     Quilt,
-    /// Plain vanilla Minecraft (no loader).
     Vanilla,
-    /// Forge — legacy modding API (not yet implemented).
     Forge,
-    /// LightyUpdater — custom server-driven modpack delivery.
     LightyUpdater,
+}
+
+impl Loader {
+    /// The name a LightyUpdater server puts in its manifest. An unknown
+    /// name is an error rather than a silent fallback: a typo would
+    /// otherwise install the wrong loader and fail much later.
+    pub fn from_server_name(name: &str) -> Result<Self, lighty_core::QueryError> {
+        match name {
+            "vanilla" => Ok(Loader::Vanilla),
+            "fabric" => Ok(Loader::Fabric),
+            "quilt" => Ok(Loader::Quilt),
+            "forge" => Ok(Loader::Forge),
+            "neoforge" => Ok(Loader::NeoForge),
+            _ => Err(lighty_core::QueryError::UnknownLoader {
+                name: name.to_string(),
+            }),
+        }
+    }
 }

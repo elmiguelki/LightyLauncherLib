@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Hamadi
 // Licensed under the MIT License
 
-//! Native libraries installation and extraction module
+//! Native libraries installation and extraction.
 
 use std::path::PathBuf;
 use async_zip::tokio::read::seek::ZipFileReader;
@@ -14,7 +14,7 @@ use futures_util::io;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::errors::{InstallerError, InstallerResult};
 use crate::installer::verifier::needs_download;
-use crate::installer::downloader::download_with_concurrency_limit;
+use crate::installer::downloader::{download_with_concurrency_limit, DownloadTask};
 
 #[cfg(feature = "events")]
 use super::super::downloader::DownloadProgressKind;
@@ -22,11 +22,11 @@ use super::super::downloader::DownloadProgressKind;
 #[cfg(feature = "events")]
 use lighty_event::EventBus;
 
-/// Collects natives that need to be downloaded and paths for extraction
-pub async fn collect_native_tasks(
+/// Collects natives that need downloading and the paths to extract.
+pub async fn collect_native_tasks<'a>(
     version: &impl VersionInfo,
-    natives: &[Native],
-) -> (Vec<(String, PathBuf)>, Vec<PathBuf>) {
+    natives: &'a [Native],
+) -> (Vec<DownloadTask<'a>>, Vec<PathBuf>) {
     if natives.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -42,7 +42,12 @@ pub async fn collect_native_tasks(
         let jar_path = libraries_path.join(path_str);
 
         if needs_download(&jar_path, native.sha1.as_ref(), &native.name).await {
-            download_tasks.push((url.clone(), jar_path.clone()));
+            download_tasks.push(DownloadTask {
+                url,
+                dest: jar_path.clone(),
+                sha1: native.sha1.as_deref(),
+                size: native.size.unwrap_or(0),
+            });
         }
 
         extract_paths.push(jar_path);
@@ -51,22 +56,27 @@ pub async fn collect_native_tasks(
     (download_tasks, extract_paths)
 }
 
-/// Downloads and extracts natives from pre-collected tasks
+/// Downloads and extracts natives from pre-collected tasks.
 pub async fn download_and_extract_natives(
     version: &impl VersionInfo,
-    download_tasks: Vec<(String, PathBuf)>,
+    jvm_arguments: Option<&[String]>,
+    download_tasks: Vec<DownloadTask<'_>>,
     extract_paths: Vec<PathBuf>,
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
 ) -> InstallerResult<()> {
-    let natives_extract_path = version.game_dirs().join("natives");
+    let natives_root = version.game_dirs().join("natives");
 
-    // Clean natives folder on each installation
-    if natives_extract_path.exists() {
-        let _ = fs::remove_dir_all(&natives_extract_path).await;
+    // Natives are cleaned on each install since LWJGL needs a fresh extraction.
+    if natives_root.exists() {
+        let _ = fs::remove_dir_all(&natives_root).await;
     }
+
+    let natives_extract_path = match jvm_arguments.and_then(library_subdir) {
+        Some(subdir) => natives_root.join(subdir),
+        None => natives_root,
+    };
     mkdir!(natives_extract_path);
 
-    // Download missing natives
     if !download_tasks.is_empty() {
         lighty_core::trace_info!("[Installer] Downloading {} natives...", download_tasks.len());
         time_it!("Natives download", {
@@ -79,12 +89,11 @@ pub async fn download_and_extract_natives(
             )
             .await?
         });
-        lighty_core::trace_info!("[Installer] ✓ Natives downloaded");
+        lighty_core::trace_info!("[Installer] Natives downloaded");
     } else {
-        lighty_core::trace_info!("[Installer] ✓ All natives already cached and verified");
+        lighty_core::trace_info!("[Installer] All natives already cached and verified");
     }
 
-    // Extract all natives in parallel
     if !extract_paths.is_empty() {
         lighty_core::trace_info!("[Installer] Extracting {} natives...", extract_paths.len());
         let extraction_tasks: Vec<_> = extract_paths
@@ -93,13 +102,26 @@ pub async fn download_and_extract_natives(
             .collect();
 
         time_it!("Natives extraction", try_join_all(extraction_tasks).await?);
-        lighty_core::trace_info!("[Installer] ✓ Natives extracted");
+        lighty_core::trace_info!("[Installer] Natives extracted");
     }
 
     Ok(())
 }
 
-/// Extracts a native JAR using async ZIP extraction
+/// Returns where the version expects its JNI libraries, relative to the
+/// natives directory. 26.x asks for a `java` subdirectory, older versions
+/// want them at the root.
+fn library_subdir(jvm_arguments: &[String]) -> Option<&str> {
+    const DECLARATION: &str = "-Djava.library.path=${natives_directory}";
+
+    jvm_arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix(DECLARATION))
+        .map(|subdir| subdir.trim_start_matches('/'))
+        .filter(|subdir| !subdir.is_empty())
+}
+
+/// Extracts a native JAR using async ZIP extraction.
 async fn extract_native(jar_path: PathBuf, natives_dir: PathBuf) -> InstallerResult<()> {
     let file = tokio::fs::File::open(&jar_path).await?;
     let buffered = BufReader::new(file);
@@ -108,7 +130,7 @@ async fn extract_native(jar_path: PathBuf, natives_dir: PathBuf) -> InstallerRes
     let entries_count = reader.file().entries().len();
 
     for index in 0..entries_count {
-        // Collect entry metadata before mutably borrowing reader
+        // Collect entry metadata before mutably borrowing reader.
         let (file_name, should_extract) = {
             let entry = reader.file().entries().get(index)
                 .ok_or_else(|| InstallerError::MissingField(
@@ -128,7 +150,6 @@ async fn extract_native(jar_path: PathBuf, natives_dir: PathBuf) -> InstallerRes
                     .unwrap_or_default()
             );
 
-            // Extract file with async I/O
             let mut entry_reader = reader.reader_with_entry(index).await?;
             let dest_file = tokio::fs::File::create(&dest_path).await?;
 
@@ -139,13 +160,10 @@ async fn extract_native(jar_path: PathBuf, natives_dir: PathBuf) -> InstallerRes
     Ok(())
 }
 
-/// Checks if a file is a native library.
+/// Returns true for native library files inside the JAR.
 ///
-/// Accepts the standard extensions (`.dll`, `.so`, `.dylib`, `.jnilib`)
-/// and Linux soname-versioned variants of the shape `*.so.N(.N)*` (e.g.
-/// `libfoo.so.1`, `libfoo.so.1.2.3`). What it must NOT match are the
-/// sidecar files LWJGL/Mojang ship alongside the native inside the JAR
-/// (`libglfw.so.sha1`, `libglfw.so.git`, `libglfw.so.md5`, …).
+/// Accepts standard extensions and Linux soname-versioned variants
+/// (`*.so.N(.N)*`) but excludes sidecars like `.sha1`, `.git`, `.md5`.
 #[inline]
 fn is_native_file(filename: &str) -> bool {
     const NATIVE_EXTENSIONS: &[&str] = &[".dll", ".so", ".dylib", ".jnilib"];
@@ -156,9 +174,7 @@ fn is_native_file(filename: &str) -> bool {
         return true;
     }
 
-    // Versioned Linux libs: everything after the last `.so.` must be
-    // purely digits and dots (e.g. `1`, `1.2`, `1.2.3`). Anything else
-    // (`.sha1`, `.git`, `.md5`, …) is a sidecar, not a native.
+    // Suffix after last `.so.` must be digits/dots only (`1`, `1.2.3`).
     if let Some(suffix) = filename_lower.rsplit_once(".so.").map(|(_, s)| s) {
         return !suffix.is_empty()
             && suffix.chars().all(|c| c.is_ascii_digit() || c == '.');

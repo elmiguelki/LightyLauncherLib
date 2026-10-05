@@ -1,25 +1,20 @@
-use crate::utils::error::QueryError;
-use crate::utils::query::{Query, QueryKey};
+use lighty_core::QueryError;
+use crate::utils::query::{InstanceKey, Query, QueryKey};
 use crate::utils::cache::Cache;
 use crate::types::VersionInfo;
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, QueryError>;
 
-/// Caches `Query` results so each remote manifest is fetched at most once
-/// per TTL window.
+/// Caches `Query` results so each remote manifest is fetched at most
+/// once per TTL window.
 ///
-/// Layered cache:
-/// - `raw_version_cache` keeps the raw manifest (the thing
-///   [`Query::fetch_full_data`] returns) keyed by instance name.
-/// - `query_cache` keeps the extracted sub-query results keyed by
-///   `(instance, sub-query)`.
-///
-/// Concurrent calls for the same key share a single fetch via the inner
-/// [`Cache::get_or_try_insert_with`] mechanism.
+/// `raw_version_cache` holds the raw manifest returned by
+/// [`Query::fetch_full_data`]; `query_cache` holds extracted sub-query
+/// results. Both key on the instance *and* the versions it points at.
 pub struct ManifestRepository<F: Query> {
     query_cache: Arc<Cache<QueryKey<F::Query>, Arc<F::Data>>>,
-    raw_version_cache: Arc<Cache<String, Arc<<F as Query>::Raw>>>,
+    raw_version_cache: Arc<Cache<InstanceKey, Arc<<F as Query>::Raw>>>,
     _marker: std::marker::PhantomData<F>,
 }
 
@@ -39,11 +34,11 @@ impl<F: Query> ManifestRepository<F> {
         query: F::Query,
     ) -> Result<Arc<F::Data>> {
         let key = QueryKey {
-            version: version.full_identifier(),
+            instance: InstanceKey::of(version),
             query: query.clone(),
         };
 
-        let ttl = F::cache_ttl_for_query(&query);
+        let ttl = version.ttl();
 
         let manifest_data: Arc<F::Data> = self
             .query_cache
@@ -53,12 +48,8 @@ impl<F: Query> ManifestRepository<F> {
                 let repo = self.clone();
 
                 async move {
-                    // Get cached version data - propagate errors
                     let full_data = repo.get_cached_version_data(&version).await?;
-
-                    // Extract data - propagate errors
                     let data = F::extract(&version, &query, &full_data).await?;
-
                     Ok::<Arc<F::Data>, QueryError>(Arc::new(data))
                 }
             })
@@ -72,8 +63,8 @@ impl<F: Query> ManifestRepository<F> {
     }
     
     async fn get_cached_version_data<V: VersionInfo>(&self, version: &V) -> Result<Arc<<F as Query>::Raw>> {
-        let ttl = F::cache_ttl();
-        let key = version.full_identifier();
+        let ttl = version.ttl();
+        let key = InstanceKey::of(version);
 
         let data = self
             .raw_version_cache
@@ -91,6 +82,18 @@ impl<F: Query> ManifestRepository<F> {
     pub async fn clear_cache(&self) {
         self.query_cache.clear().await;
         self.raw_version_cache.clear().await;
+    }
+
+    /// Invalidates every cached entry (raw manifest + sub-queries) tied
+    /// to a single instance. Used by `InstanceCache::clear_cache` to
+    /// purge one builder without touching others.
+    pub async fn invalidate(&self, version_name: &str) {
+        let needle = version_name.to_string();
+        let needle_for_query = needle.clone();
+        self.raw_version_cache.retain(move |k| k.name != needle).await;
+        self.query_cache
+            .retain(move |k| k.instance.name != needle_for_query)
+            .await;
     }
 
     pub async fn cache_len(&self) -> (usize, usize) {

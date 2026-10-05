@@ -1,10 +1,7 @@
 // Copyright (c) 2025 Hamadi
 // Licensed under the MIT License
 
-//! JRE Download and Installation
-//!
-//! This module handles downloading and extracting Java Runtime Environments.
-//! Implementation is based on standard Rust async patterns and public APIs.
+//! JRE download and extraction.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -71,12 +68,8 @@ where
     let runtime_dir = build_runtime_path(runtimes_folder, &effective_distribution, version);
     prepare_installation_directory_with_retry(&runtime_dir).await?;
 
-    let download_urls = build_download_candidates(&effective_distribution, version)
-        .await
-        .map_err(|e| JreError::Download(format!("Failed to get download URL: {}", e)))?;
-    let primary_url = download_urls
-        .first()
-        .ok_or_else(|| JreError::Download("No download URLs available".to_string()))?;
+    let download_urls = build_download_candidates(&effective_distribution, version).await?;
+    let primary_url = &download_urls[0];
 
     let mut expected_total_bytes = 0;
     if let Some(bus) = event_bus {
@@ -85,7 +78,7 @@ where
             .header("accept-encoding", "identity")
             .send()
             .await
-            .map_err(|e| JreError::Download(format!("Failed to check file size: {}", e)))?;
+            .map_err(DownloadError::from)?;
 
         let encoding = response
             .headers()
@@ -176,9 +169,7 @@ where
     let runtime_dir = build_runtime_path(runtimes_folder, &effective_distribution, version);
     prepare_installation_directory_with_retry(&runtime_dir).await?;
 
-    let download_urls = build_download_candidates(&effective_distribution, version)
-        .await
-        .map_err(|e| JreError::Download(format!("Failed to get download URL: {}", e)))?;
+    let download_urls = build_download_candidates(&effective_distribution, version).await?;
 
     let archive_bytes = {
         let progress_cb = |current: u64, total: u64| {
@@ -202,11 +193,7 @@ async fn build_download_candidates(
 ) -> JreResult<Vec<String>> {
     let mut urls = Vec::new();
 
-    let primary = distribution
-        .get_download_url(version)
-        .await
-        .map_err(|e| JreError::Download(format!("Failed to get download URL: {}", e)))?;
-    urls.push(primary);
+    urls.push(distribution.get_download_url(version).await?);
 
     if matches!(distribution, JavaDistribution::Temurin) {
         for candidate in [JavaDistribution::Zulu, JavaDistribution::Liberica] {
@@ -263,7 +250,7 @@ async fn prepare_installation_directory_with_retry(runtime_dir: &Path) -> JreRes
     }
 
     Err(last_error.unwrap_or_else(|| {
-        JreError::Download("Failed to prepare runtime directory".to_string())
+        JreError::Io(std::io::Error::other("Failed to prepare runtime directory"))
     }))
 }
 
@@ -304,12 +291,11 @@ where
         }
     }
 
-    Err(JreError::Download(format!(
-        "Download failed: {}",
-        last_error
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "No candidates available for download".to_string())
-    )))
+    Err(JreError::Transfer(last_error.unwrap_or_else(|| {
+        DownloadError::Io(std::io::Error::other(
+            "No candidates available for download",
+        ))
+    })))
 }
 
 /// Extracts the JRE archive based on the operating system (with events feature)
@@ -324,13 +310,11 @@ async fn extract_archive(
     match OS {
         OperatingSystem::WINDOWS => {
             zip_extract(cursor, destination, event_bus)
-                .await
-                .map_err(|e| JreError::Extraction(format!("ZIP extraction failed: {}", e)))?;
+                .await?;
         }
         OperatingSystem::LINUX | OperatingSystem::OSX => {
             tar_gz_extract(cursor, destination, event_bus)
-                .await
-                .map_err(|e| JreError::Extraction(format!("TAR.GZ extraction failed: {}", e)))?;
+                .await?;
         }
         OperatingSystem::UNKNOWN => {
             return Err(JreError::UnsupportedOS);
@@ -348,13 +332,11 @@ async fn extract_archive(archive_bytes: &[u8], destination: &Path) -> JreResult<
     match OS {
         OperatingSystem::WINDOWS => {
             zip_extract(cursor, destination)
-                .await
-                .map_err(|e| JreError::Extraction(format!("ZIP extraction failed: {}", e)))?;
+                .await?;
         }
         OperatingSystem::LINUX | OperatingSystem::OSX => {
             tar_gz_extract(cursor, destination)
-                .await
-                .map_err(|e| JreError::Extraction(format!("TAR.GZ extraction failed: {}", e)))?;
+                .await?;
         }
         OperatingSystem::UNKNOWN => {
             return Err(JreError::UnsupportedOS);

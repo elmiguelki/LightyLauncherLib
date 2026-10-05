@@ -1,466 +1,166 @@
-# How to Use lighty-auth
+# How to use `lighty-auth`
 
-## Basic Usage
-
-### Offline Authentication
-
-For local development and testing without network access:
+The pattern is the same for every provider: instantiate, call
+`authenticate(&mut self, …)`, hand the resulting `UserProfile` to the
+launch pipeline.
 
 ```rust
 use lighty_auth::{offline::OfflineAuth, Authenticator};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create offline authenticator
-    let mut auth = OfflineAuth::new("Player123");
+# async fn run() -> anyhow::Result<()> {
+let mut auth = OfflineAuth::new("Player");
+let profile  = auth.authenticate(
+    #[cfg(feature = "events")] None,
+).await?;
 
-    // Authenticate (without events)
-    #[cfg(not(feature = "events"))]
-    let profile = auth.authenticate().await?;
-
-    // Authenticate (with events)
-    #[cfg(feature = "events")]
-    let profile = auth.authenticate(None).await?;
-
-    println!("Username: {}", profile.username);
-    println!("UUID: {}", profile.uuid); // Deterministic UUID
-
-    Ok(())
-}
+println!("{} → {}", profile.username, profile.uuid);
+# Ok(()) }
 ```
 
-**Key features**:
-- No network required
-- Deterministic UUID generation (same username = same UUID)
-- Perfect for development and testing
+Two things to keep in mind for every provider:
 
-### Microsoft Authentication
+- `authenticate` takes `&mut self` — providers cache state (device
+  codes, polling cursors, 2FA codes).
+- The `event_bus` parameter only exists when the `events` feature is
+  enabled. Without `events`: `authenticate().await?`. With: `authenticate(Some(&bus)).await?`
+  (or `None`).
 
-OAuth 2.0 Device Code Flow for legitimate Minecraft accounts:
+For provider-specific snippets, jump to the matching provider doc:
+[Offline](./offline.md), [Microsoft](./microsoft.md),
+[Azuriom](./azuriom.md), or [Trait](./trait.md) for a custom backend.
+Runnable end-to-end programs live under [`examples/auth/`](../../../examples/auth/).
+
+## Picking a provider
+
+| When you want… | Use |
+|---|---|
+| No network, deterministic UUID, fixtures, tests | [`OfflineAuth`](./offline.md) |
+| Premium Minecraft accounts | [`MicrosoftAuth`](./microsoft.md) |
+| Email/password on an Azuriom CMS | [`AzuriomAuth`](./azuriom.md) |
+| Anything else (LDAP, your own backend, …) | Implement [`Authenticator`](./trait.md) |
+
+## `UserProfile` fields by provider
+
+| Field | Offline | Microsoft | Azuriom |
+|---|---|---|---|
+| `id` | None | None | Server ID |
+| `username` | input | from MC profile | from server |
+| `uuid` | derived | from MC profile | from server |
+| `access_token` | None | MC token (`SecretString`) | session token (`SecretString`) |
+| `xuid` | None | decoded from MC JWT | None |
+| `email` | None | None | input email |
+| `email_verified` | `false` | `true` | from server |
+| `money` | None | None | from server |
+| `role` | None | None | from server |
+| `banned` | `false` | `false` | from server |
+| `provider` | `Offline` | `Microsoft { client_id, refresh_token }` | `Azuriom { base_url }` |
+
+The `provider` variant drives the `${user_type}` launch placeholder:
+`Microsoft` → `"msa"`, `Azuriom` → `"mojang"`, `Offline` /
+`Custom` → `"legacy"`.
+
+## Tracking progress with events
+
+Enable the `events` feature and pass an `EventBus`. The auth crate
+emits `AuthEvent` variants (catalogue in
+[events.md](./events.md)) — for the full event-bus mechanics see
+[`crates/event/docs/events.md`](../../event/docs/events.md).
 
 ```rust
+# #[cfg(feature = "events")]
+# {
 use lighty_auth::{microsoft::MicrosoftAuth, Authenticator};
+use lighty_event::{AuthEvent, Event, EventBus};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize with Azure client ID
-    let mut auth = MicrosoftAuth::new("your-azure-client-id");
+# async fn run() -> anyhow::Result<()> {
+let bus = EventBus::new(1000);
+let mut rx = bus.subscribe();
 
-    // Set callback for device code display
-    auth.set_device_code_callback(|code, url| {
-        println!("\n=== Microsoft Login ===");
-        println!("Visit: {}", url);
-        println!("Enter code: {}", code);
-        println!("======================\n");
-    });
-
-    // Authenticate (without events)
-    #[cfg(not(feature = "events"))]
-    let profile = auth.authenticate().await?;
-
-    // Authenticate (with events)
-    #[cfg(feature = "events")]
-    let profile = auth.authenticate(None).await?;
-
-    println!("Logged in as: {}", profile.username);
-    println!("UUID: {}", profile.uuid);
-    println!("Access token: {}", profile.access_token.unwrap_or_default());
-
-    Ok(())
-}
-```
-
-**Key features**:
-- Device code flow (no embedded browser needed)
-- Full Xbox Live and Minecraft Services integration
-- Returns Minecraft access token for session validation
-- Captures the MS refresh token in `profile.provider` for silent
-  re-auth on subsequent launches (see below)
-
-### Silent Re-authentication (Microsoft "Remember Me")
-
-After the first device-code authentication, the resulting `UserProfile`
-carries the MS refresh token under
-`AuthProvider::Microsoft { refresh_token: Some(_), .. }`. Persist the
-whole profile, then on the next launch call
-`MicrosoftAuth::authenticate_with_refresh_token` instead of
-`authenticate` — no device-code prompt, no user interaction.
-
-```rust
-use lighty_launcher::prelude::*;
-
-let mut auth = MicrosoftAuth::new("your-azure-client-id");
-
-// 1) Try silent first using the refresh token from a previous run.
-let profile = match load_saved_profile() {
-    Some(saved) => match saved.provider {
-        AuthProvider::Microsoft { refresh_token: Some(rt), .. } => {
-            auth.authenticate_with_refresh_token(&rt, None).await.ok()
-        }
-        _ => None,
-    },
-    None => None,
-};
-
-// 2) Fall back to device-code if no token saved or refresh failed
-//    (token expired after ~90 days of inactivity, or was revoked).
-let profile = match profile {
-    Some(p) => p,
-    None => {
-        auth.set_device_code_callback(|code, url| {
-            println!("Visit {url} and enter: {code}");
-        });
-        auth.authenticate(None).await?
-    }
-};
-
-// 3) Persist again — Microsoft rotates the refresh token on every use
-//    (RFC 6749), and the new one is now inside `profile.provider`.
-save_profile(&profile)?;
-```
-
-**Recommended storage**: the OS-native secure store via the
-[`keyring`](https://crates.io/crates/keyring) crate — Linux Secret
-Service / macOS Keychain / Windows Credential Manager, encrypted at
-rest by the OS. The library does not depend on `keyring`; persistence
-is intentionally left to the consumer.
-
-A complete runnable example with keyring lives at
-[`examples/auth/microsoft.rs`](../../../examples/auth/microsoft.rs).
-
-### Azuriom Authentication
-
-Server-based authentication with custom CMS:
-
-```rust
-use lighty_auth::{azuriom::AzuriomAuth, Authenticator, AuthError};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize with server URL and credentials
-    let mut auth = AzuriomAuth::new(
-        "https://yourserver.com",
-        "user@example.com",
-        "password123"
-    );
-
-    // Authenticate (without events)
-    #[cfg(not(feature = "events"))]
-    match auth.authenticate().await {
-        Ok(profile) => {
-            println!("Logged in as: {}", profile.username);
-            println!("Email: {}", profile.email.unwrap_or_default());
-            println!("Money: {}", profile.money.unwrap_or(0.0));
-
-            if let Some(role) = &profile.role {
-                println!("Role: {} ({})", role.name, role.color.as_ref().unwrap_or(&"#FFFFFF".to_string()));
-            }
-        }
-        Err(AuthError::TwoFactorRequired) => {
-            println!("2FA required!");
-            // Get code from user
-            let code = "123456"; // Get from UI input
-            auth.set_two_factor_code(code);
-
-            // Retry authentication with 2FA code
-            let profile = auth.authenticate().await?;
-            println!("Logged in with 2FA: {}", profile.username);
-        }
-        Err(e) => {
-            eprintln!("Authentication failed: {}", e);
+tokio::spawn(async move {
+    while let Ok(event) = rx.next().await {
+        if let Event::Auth(AuthEvent::AuthenticationInProgress { step, .. }) = event {
+            println!("→ {step}");
         }
     }
+});
 
-    Ok(())
-}
+let mut auth = MicrosoftAuth::new("your-client-id");
+auth.set_device_code_callback(|code, url| {
+    println!("Visit {url} and enter {code}");
+});
+
+let _profile = auth.authenticate(Some(&bus)).await?;
+# Ok(()) }
+# }
 ```
 
-**Key features**:
-- Two-factor authentication support
-- User roles with colors
-- Money/credits tracking
-- Email verification status
+The device code itself is delivered through the callback signature
+`Fn(&str, &str) + Send + Sync`, not through events — the consumer
+needs the raw `(code, url)` to display somewhere.
 
-## With Events
+## Persisting tokens (the right way)
 
-Track authentication progress with events:
+`UserProfile` is intentionally **not** `Serialize` / `Deserialize`,
+and its `access_token` is a `SecretString`. Dumping it to disk in JSON
+is impossible by construction. Two recommended setups:
+
+1. **Built-in OS keychain routing** (recommended, requires `keyring`
+   feature). Call `.with_keyring("MyLauncher")` on the provider; the
+   token is written into the keychain automatically and the returned
+   profile carries a [`TokenHandle`](./exports.md#os-keychain-feature-keyring)
+   instead of the raw value. Details:
+   [Microsoft](./microsoft.md#os-keychain-routing-with_keyring),
+   [Azuriom](./azuriom.md#os-keychain-routing-with_keyring).
+2. **Manual refresh-token persistence** (Microsoft only). Extract
+   `AuthProvider::Microsoft.refresh_token` and stash it in the OS
+   keychain via the `keyring` crate. Pattern shown in
+   [microsoft.md → Silent re-auth](./microsoft.md#silent-re-auth).
+
+Full threat model and rationale: `AUTH_SECRETS.md` at the workspace
+root.
+
+## Error handling
+
+`AuthError` carries one variant per failure class. The most useful
+ones to match individually:
 
 ```rust
-use lighty_auth::{microsoft::MicrosoftAuth, Authenticator};
-use lighty_event::{EventBus, Event, AuthEvent};
+use lighty_auth::{AuthError, microsoft::MicrosoftAuth, Authenticator};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create event bus
-    let event_bus = EventBus::new(1000);
-    let mut receiver = event_bus.subscribe();
+# async fn run() -> anyhow::Result<()> {
+let mut auth = MicrosoftAuth::new("client-id");
+auth.set_device_code_callback(|c, u| println!("Visit {u} and enter {c}"));
 
-    // Spawn event listener
-    tokio::spawn(async move {
-        while let Ok(event) = receiver.next().await {
-            match event {
-                Event::Auth(AuthEvent::AuthenticationStarted { provider }) => {
-                    println!("🔐 Starting authentication with: {:?}", provider);
-                }
-                Event::Auth(AuthEvent::DeviceCodeReceived { code, url, .. }) => {
-                    println!("📱 Device code: {}", code);
-                    println!("🌐 URL: {}", url);
-                }
-                Event::Auth(AuthEvent::WaitingForUser) => {
-                    println!("⏳ Waiting for user to complete authentication...");
-                }
-                Event::Auth(AuthEvent::AuthenticationSuccess { username, provider }) => {
-                    println!("✓ Successfully authenticated as {} via {:?}", username, provider);
-                }
-                Event::Auth(AuthEvent::AuthenticationFailed { error, .. }) => {
-                    eprintln!("✗ Authentication failed: {}", error);
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Authenticate with events
-    let mut auth = MicrosoftAuth::new("your-client-id");
-    auth.set_device_code_callback(|code, url| {
-        println!("Visit {} and enter {}", url, code);
-    });
-
-    let profile = auth.authenticate(Some(&event_bus)).await?;
-    println!("Profile: {:?}", profile);
-
-    Ok(())
+match auth.authenticate(
+    #[cfg(feature = "events")] None,
+).await {
+    Ok(_)                                => { /* … */ }
+    Err(AuthError::InvalidCredentials)   => { /* wrong user/pass */ }
+    Err(AuthError::TwoFactorRequired)    => { /* prompt for 2FA */ }
+    Err(AuthError::Invalid2FACode)       => { /* retry 2FA */ }
+    Err(AuthError::AccountBanned(name))  => { eprintln!("Banned: {name}"); }
+    Err(AuthError::DeviceCodeExpired)    => { /* user didn't authorise in time */ }
+    Err(AuthError::Cancelled)            => { /* user declined */ }
+    Err(AuthError::InvalidToken)         => { /* stored token expired */ }
+    Err(AuthError::Network(_))           => { /* offline / DNS / TLS */ }
+    Err(AuthError::InvalidResponse(msg)) => { eprintln!("Bad server payload: {msg}"); }
+    #[cfg(feature = "keyring")]
+    Err(AuthError::Keyring(_))           => { /* OS keychain issue */ }
+    Err(e)                               => eprintln!("{e}"),
 }
+# Ok(()) }
 ```
 
-## Custom Authenticator
+## Writing your own provider
 
-Implement the `Authenticator` trait for your own authentication system:
+Implement [`Authenticator`](./trait.md) — a single async method.
+Once that's done, your provider plugs into the launch pipeline and
+the event bus exactly like the built-in ones.
 
-```rust
-use lighty_auth::{Authenticator, UserProfile, UserRole, AuthResult, AuthError, AuthProvider};
-use lighty_core::hosts::HTTP_CLIENT;
+## Related
 
-#[cfg(feature = "events")]
-use lighty_event::EventBus;
-
-pub struct CustomAuth {
-    api_url: String,
-    username: String,
-    password: String,
-}
-
-impl CustomAuth {
-    pub fn new(api_url: &str, username: &str, password: &str) -> Self {
-        Self {
-            api_url: api_url.to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-        }
-    }
-}
-
-impl Authenticator for CustomAuth {
-    #[cfg(feature = "events")]
-    async fn authenticate(
-        &mut self,
-        event_bus: Option<&EventBus>,
-    ) -> AuthResult<UserProfile> {
-        // Emit start event
-        if let Some(bus) = event_bus {
-            use lighty_event::{Event, AuthEvent};
-            bus.emit(Event::Auth(AuthEvent::AuthenticationStarted {
-                provider: AuthProvider::Custom {
-                    base_url: self.api_url.clone(),
-                },
-            }));
-        }
-
-        // Make API request
-        let response = HTTP_CLIENT
-            .post(format!("{}/api/login", self.api_url))
-            .json(&serde_json::json!({
-                "username": self.username,
-                "password": self.password,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(AuthError::InvalidCredentials);
-        }
-
-        let data: serde_json::Value = response.json().await
-            .map_err(|e| AuthError::ParseError(e.to_string()))?;
-
-        // Emit success event
-        if let Some(bus) = event_bus {
-            use lighty_event::{Event, AuthEvent};
-            bus.emit(Event::Auth(AuthEvent::AuthenticationSuccess {
-                username: self.username.clone(),
-                provider: AuthProvider::Custom {
-                    base_url: self.api_url.clone(),
-                },
-            }));
-        }
-
-        Ok(UserProfile {
-            id: data["id"].as_u64(),
-            username: self.username.clone(),
-            uuid: data["uuid"].as_str().unwrap_or("").to_string(),
-            access_token: data["token"].as_str().map(String::from),
-            email: data["email"].as_str().map(String::from),
-            email_verified: data["email_verified"].as_bool().unwrap_or(false),
-            money: data["money"].as_f64(),
-            role: data["role"].as_object().map(|r| UserRole {
-                name: r["name"].as_str().unwrap_or("User").to_string(),
-                color: r["color"].as_str().map(String::from),
-            }),
-            banned: data["banned"].as_bool().unwrap_or(false),
-        })
-    }
-
-    #[cfg(not(feature = "events"))]
-    async fn authenticate(&mut self) -> AuthResult<UserProfile> {
-        // Same implementation without events
-        // ...
-        todo!()
-    }
-}
-```
-
-## Offline UUID Generation
-
-Generate deterministic UUIDs for offline mode:
-
-```rust
-use lighty_auth::generate_offline_uuid;
-
-fn main() {
-    // Generate UUID from username
-    let uuid1 = generate_offline_uuid("Player123");
-    let uuid2 = generate_offline_uuid("Player123");
-    let uuid3 = generate_offline_uuid("Different");
-
-    println!("UUID 1: {}", uuid1);
-    println!("UUID 2: {}", uuid2); // Same as UUID 1
-    println!("UUID 3: {}", uuid3); // Different
-
-    assert_eq!(uuid1, uuid2); // Always the same for same username
-    assert_ne!(uuid1, uuid3); // Different for different username
-}
-```
-
-**How it works**:
-- Uses SHA1 hash of username
-- Formats as Minecraft-compatible UUID with dashes
-- Deterministic: same input always produces same output
-
-## Error Handling
-
-```rust
-use lighty_auth::{microsoft::MicrosoftAuth, Authenticator, AuthError};
-
-#[tokio::main]
-async fn main() {
-    let mut auth = MicrosoftAuth::new("client-id");
-    auth.set_device_code_callback(|code, url| {
-        println!("Code: {}, URL: {}", code, url);
-    });
-
-    #[cfg(not(feature = "events"))]
-    match auth.authenticate().await {
-        Ok(profile) => {
-            println!("Success: {}", profile.username);
-        }
-        Err(AuthError::NetworkError(e)) => {
-            eprintln!("Network error: {}", e);
-        }
-        Err(AuthError::InvalidCredentials) => {
-            eprintln!("Invalid username or password");
-        }
-        Err(AuthError::TwoFactorRequired) => {
-            eprintln!("2FA code required");
-        }
-        Err(AuthError::AccountBanned) => {
-            eprintln!("Account is banned");
-        }
-        Err(AuthError::MicrosoftAuthFailed(msg)) => {
-            eprintln!("Microsoft auth failed: {}", msg);
-        }
-        Err(AuthError::XboxLiveAuthFailed(msg)) => {
-            eprintln!("Xbox Live auth failed: {}", msg);
-        }
-        Err(AuthError::MinecraftAuthFailed(msg)) => {
-            eprintln!("Minecraft auth failed: {}", msg);
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-        }
-    }
-}
-```
-
-## Feature Flags
-
-```toml
-[dependencies]
-lighty-auth = { version = "26.5.1", features = ["events", "tracing"] }
-```
-
-Available features:
-- `events` - Enables AuthEvent emission (requires lighty-event)
-- `tracing` - Enables logging macros
-
-## Exports
-
-**In lighty_auth**:
-```rust
-use lighty_auth::{
-    // Trait
-    Authenticator,
-
-    // Types
-    UserProfile,
-    UserRole,
-    AuthProvider,
-    AuthResult,
-
-    // Helper
-    generate_offline_uuid,
-
-    // Providers
-    offline::OfflineAuth,
-    microsoft::MicrosoftAuth,
-    azuriom::AzuriomAuth,
-
-    // Errors
-    AuthError,
-};
-```
-
-**In lighty_launcher**:
-```rust
-use lighty_launcher::auth::{
-    Authenticator,
-    UserProfile,
-    // ... etc
-};
-```
-
-## Related Documentation
-
-- [Overview](./overview.md) - Architecture and design
-- [Events](./events.md) - AuthEvent types
-- [Exports](./exports.md) - Complete export reference
-- [Offline](./offline.md) - Offline authentication details
-- [Microsoft](./microsoft.md) - Microsoft OAuth flow details
-- [Azuriom](./azuriom.md) - Azuriom authentication details
-- [Trait](./trait.md) - Implementing custom authenticators
-
-## Related Crates
-
-- **[lighty-event](../../event/README.md)** - Event system
-- **[lighty-core](../../core/README.md)** - Hash utilities for offline UUID
-- **[lighty-launch](../../launch/README.md)** - Uses UserProfile for launching
+- [Trait](./trait.md) — custom authenticator skeleton
+- [Events](./events.md) — `AuthEvent` lifecycle
+- [Exports](./exports.md) — full public API
+- Provider docs: [Offline](./offline.md), [Microsoft](./microsoft.md), [Azuriom](./azuriom.md)
+- [`crates/launch/docs/how-to-use.md`](../../launch/docs/how-to-use.md) — feeding `UserProfile` to a launch

@@ -1,21 +1,31 @@
-# Event Module System
+# Module layout
 
-## Overview
-
-Events are organized into modules for better maintainability.
-
-## Module Structure
+Source files under `crates/event/src/module/`:
 
 ```
 module/
-├── auth.rs      - Authentication events
-├── java.rs      - Java distribution events
-├── launch.rs    - Game launch events
-├── loader.rs    - Mod loader events
-├── core.rs      - Core system events
-└── console.rs   - Instance console events
+├── auth.rs        AuthEvent
+├── core.rs        CoreEvent
+├── java.rs        JavaEvent
+├── launch.rs      LaunchEvent
+├── loader.rs      LoaderEvent
+├── modloader.rs   ModloaderEvent  (split out of launch.rs)
+└── console.rs     ConsoleStream, InstanceLaunchedEvent,
+                   InstanceWindowAppearedEvent, InstanceExitedEvent,
+                   ConsoleOutputEvent, InstanceDeletedEvent
 ```
 
-## Creating Custom Modules
+Each `*.rs` defines one event family. The crate root re-exports them
+flat (`pub use module::AuthEvent;` …) and wraps them in the root
+`Event` enum.
 
-See main repository for extension guides.
+`modloader.rs` is recent: the `ModResolve*` and `Modpack*` variants
+used to live in `launch.rs` and are now their own `ModloaderEvent`
+enum, reached through `Event::Modloader(_)`. The per-bucket
+post-install summaries (`ResourcePacksInstalled`, `ShaderPacksInstalled`,
+`DatapacksInstalled`) only live here.
+
+## See also
+
+- [`events.md`](./events.md) — catalogue of every variant per module
+- [`architecture.md`](./architecture.md) — broadcast / fan-out model

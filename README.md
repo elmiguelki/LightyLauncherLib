@@ -1,45 +1,36 @@
-# LightyLauncher
+# LightyLauncherLib
 
+[![Maintained](https://img.shields.io/badge/Maintained-yes-2ea44f.svg)](#)
 [![Crates.io](https://img.shields.io/crates/v/lighty-launcher.svg)](https://crates.io/crates/lighty-launcher)
-[![Documentation](https://docs.rs/lighty-launcher/badge.svg)](https://docs.rs/lighty-launcher)
+[![Documentation](https://img.shields.io/badge/docs-gitbook-blue.svg)](https://hamadi.gitbook.io/lightylauncher)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust Version](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.98%2B-red.svg)](https://www.rust-lang.org)
+[![Maintainer](https://img.shields.io/badge/Maintainer-Hamadi-blue.svg)](https://github.com/Kalandi)
 
-> **ACTIVE DEVELOPMENT** - API may change between versions. Use with caution in production.
+<p align="center">
+  <img src="assets/banner.png" alt="LightyLauncher banner" />
+</p>
 
-A modern, modular Minecraft launcher library for Rust with full async support, real-time event system, and automatic Java management.
+## A launcher built with LightyLauncherLib
 
-![LightyUpdater Banner](docs/img/banner.png)
+[exemple_launcher_with_lightylauncherlib_small.webm](https://github.com/user-attachments/assets/36134ddf-935b-4f2d-9047-78c8d6504ade)
 
-## Features
-
-- **Modular Architecture**: Organized into logical crates (`auth`, `event`, `java`, `launch`, `loaders`, `version`, `core`)
-- **Multi-Loader Support**: Vanilla, Fabric, Quilt, NeoForge, Forge, OptiFine, LightyUpdater
-- **Event System**: Real-time progress tracking for all operations
-- **Authentication**: Offline, Microsoft OAuth 2.0, Azuriom CMS + extensibility for custom providers
-- **Automatic Java Management**: Download and manage JRE distributions (Temurin, GraalVM, Zulu, Liberica)
-- **Cross-Platform**: Windows, Linux, and macOS support
-
-## Installation
+## Quick start
 
 ```toml
 [dependencies]
-lighty-launcher = "26.5.1"
+lighty-launcher = { version = "<project_version>", features = ["vanilla"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 ```
-
-## Quick Start
 
 ```rust
 use lighty_launcher::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize AppState
     AppState::init("MyLauncher")?;
 
-    // Create instance
     let mut instance = VersionBuilder::new(
         "my-instance",
         Loader::Vanilla,
@@ -47,12 +38,11 @@ async fn main() -> anyhow::Result<()> {
         "1.21.1",
     );
 
-    // Authenticate
     let mut auth = OfflineAuth::new("Player123");
     let profile = auth.authenticate().await?;
 
-    // Launch
-    instance.launch(&profile, JavaDistribution::Temurin)
+    instance
+        .launch(&profile, JavaDistribution::Temurin)
         .run()
         .await?;
 
@@ -60,160 +50,84 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Documentation
+Microsoft auth, modpacks, event streams, every loader — runnable
+samples in [`examples/`](examples/).
 
-### 📖 Guides
+## What you get
 
-Comprehensive documentation in the `docs/` directory:
-
-| Guide | Description |
-|-------|-------------|
-| **[Sequence Diagrams](docs/sequence-diagrams.md)** | Visual diagrams of all workflows (launch, authentication, installation) |
-| **[Re-exports Reference](docs/reexports.md)** | Complete list of all re-exported types and their sources |
-| **[Architecture](docs/architecture.md)** | System architecture, design patterns, and module dependencies |
-| **[Examples](docs/examples.md)** | Detailed walkthrough of all examples with code explanations |
-
-### 📦 Crate Documentation
-
-Complete documentation for each crate:
-
-### Core Crates
-
-| Crate | Description | Documentation |
-|-------|-------------|---------------|
-| **[lighty-core](crates/core/README.md)** | Core utilities and AppState management | [📚 Docs](crates/core/README.md) |
-| **[lighty-launcher](crates/launcher/README.md)** | Main package with re-exports | [📚 Docs](crates/launcher/README.md) |
-
-### Feature Crates
-
-| Crate | Description | Documentation |
-|-------|-------------|---------------|
-| **[lighty-auth](crates/auth/README.md)** | Authentication (Offline, Microsoft, Azuriom) | [📚 Docs](crates/auth/README.md) |
-| **[lighty-java](crates/java/README.md)** | Java runtime management | [📚 Docs](crates/java/README.md) |
-| **[lighty-launch](crates/launch/README.md)** | Game launching and process management | [📚 Docs](crates/launch/README.md) |
-| **[lighty-loaders](crates/loaders/README.md)** | Mod loader implementations | [📚 Docs](crates/loaders/README.md) |
-| **[lighty-version](crates/version/README.md)** | Version builders | [📚 Docs](crates/version/README.md) |
-| **[lighty-event](crates/event/README.md)** | Event system for progress tracking | [📚 Docs](crates/event/README.md) |
-
-### Detailed Guides
-
-#### lighty-launch Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [Launch Process](crates/launch/docs/launch.md) | Complete launch workflow (5 phases) |
-| [Arguments System](crates/launch/docs/arguments.md) | Placeholders, JVM options, game arguments |
-| [Installation](crates/launch/docs/installation.md) | Asset/library installation details |
-| [Instance Control](crates/launch/docs/instance-control.md) | Process management and PID tracking |
-| [Events](crates/launch/docs/events.md) | Event types reference |
-| [How to Use](crates/launch/docs/how-to-use.md) | Practical examples |
-| [Exports](crates/launch/docs/exports.md) | Module exports reference |
-
-#### lighty-version Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [How to Use](crates/version/docs/how-to-use.md) | Practical usage guide |
-| [Overview](crates/version/docs/overview.md) | Architecture and design |
-| [Exports](crates/version/docs/exports.md) | Module exports reference |
-| [VersionBuilder](crates/version/docs/version-builder.md) | Standard builder details |
-| [LightyVersionBuilder](crates/version/docs/lighty-version-builder.md) | Custom server builder |
-
-## Examples
-
-The `examples/` directory contains ready-to-use examples for all loaders and features:
-
-| Example | Description | Features Required |
-|---------|-------------|-------------------|
-| **[vanilla.rs](examples/vanilla.rs)** | Basic Vanilla Minecraft launcher | `vanilla` |
-| **[fabric.rs](examples/fabric.rs)** | Fabric mod loader | `fabric` |
-| **[quilt.rs](examples/quilt.rs)** | Quilt mod loader | `quilt` |
-| **[neoforge.rs](examples/neoforge.rs)** | NeoForge mod loader | `neoforge` |
-| **[forge.rs](examples/forge.rs)** | Forge mod loader | `forge` |
-| **[forge_legacy.rs](examples/forge_legacy.rs)** | Legacy Forge (1.7.10-1.12.2) | `forge_legacy` |
-| **[optifine.rs](examples/optifine.rs)** | OptiFine launcher | `optifine` |
-| **[lighty_updater.rs](examples/lighty_updater.rs)** | Custom modpack server | `lighty_updater` |
-| **[with_events.rs](examples/with_events.rs)** | Complete event system & instance management | `vanilla`, `events` |
-
-### Running Examples
-
-```bash
-# Vanilla Minecraft
-cargo run --example vanilla --features vanilla
-
-# Fabric with events
-cargo run --example fabric --features fabric,events
-
-# Complete demo with events and instance management
-cargo run --example with_events --features vanilla,events
-
-# LightyUpdater
-cargo run --example lighty_updater --features lighty_updater
-```
-
-### Advanced Examples
-
-**with_events.rs** demonstrates:
-- Real-time event tracking for all operations
-- Instance lifecycle management (create, launch, monitor, close, delete)
-- Console output streaming
-- Instance size calculation
-- PID tracking and control
-
-See [docs/examples.md](docs/examples.md) for detailed example documentation.
-
-## Cargo Features
-
-```toml
-# Minimal - Vanilla only
-lighty-launcher = { version = "26.5.1", features = ["vanilla"] }
-
-# With events
-lighty-launcher = { version = "26.5.1", features = ["vanilla", "events"] }
-
-# Multiple loaders
-lighty-launcher = { version = "26.5.1", features = ["vanilla", "fabric", "quilt", "events"] }
-
-# All loaders
-lighty-launcher = { version = "26.5.1", features = ["all-loaders", "events"] }
-```
-
-**Available Features:**
-- `vanilla` - Vanilla Minecraft support (required base)
-- `fabric` - Fabric loader
-- `quilt` - Quilt loader
-- `neoforge` - NeoForge loader
-- `forge` - Forge loader
-- `forge_legacy` - Legacy Forge (1.7.10 - 1.12.2)
-- `lighty_updater` - Custom updater system
-- `all-loaders` - All mod loaders
-- `events` - Event system
+- **Light.** Only ships what you use. A pure-Fabric build never pulls in the Forge pipeline.
+- **Fast.** Mods, libs, assets, resourcepacks, shaders — downloaded in parallel.
+- **Mods & modpacks just work.** Drop a Modrinth slug or a CurseForge id and the file lands in the right folder. `.mrpack` and `.zip` modpacks supported out of the box.
+- **Tokens stay yours.** Microsoft and Azuriom secrets can't leak through logs or JSON dumps. OS keychain storage is one method call away.
+- **You see everything.** Typed events stream every step on a broadcast bus — perfect for a real-time UI.
 
 ## Architecture
 
 ```
-lighty-launcher/
-├── crates/
-│   ├── core/           # Core utilities and AppState
-│   ├── auth/           # Authentication providers
-│   ├── event/          # Event system
-│   ├── java/           # Java runtime management
-│   ├── launch/         # Launch orchestration
-│   ├── loaders/        # Mod loader implementations
-│   ├── version/        # Version builders
-│   └── launcher/       # Main package with re-exports
-├── examples/           # Usage examples
-└── docs/              # Additional documentation
+lighty-launcher/             # Root crate (prelude + feature gates)
+└── crates/
+    ├── core/                # AppState, HTTP, hashing, extract
+    ├── auth/                # Offline / Microsoft / Azuriom
+    ├── event/               # Broadcast bus + typed events
+    ├── java/                # JRE auto-download
+    ├── launch/              # Install + game lifecycle
+    ├── loaders/             # Vanilla / Fabric / Quilt / Forge / NeoForge
+    ├── modsloader/          # Modrinth + CurseForge + modpack pipelines
+    └── version/             # VersionBuilder
 ```
+
+## Cargo features
+
+| Feature | Effect |
+|---|---|
+| `vanilla` / `fabric` / `quilt` / `neoforge` / `forge` | Enable that loader (`forge` covers modern + legacy 1.7.10–1.12.2) |
+| `lighty_updater` | Custom updater backend (auto-pulls vanilla/fabric/quilt/neoforge/forge) |
+| `all-loaders` | Every loader above |
+| `modrinth` | Modrinth API + `.mrpack` modpack support |
+| `curseforge` | CurseForge API + `.zip` modpack support (requires API key) |
+| `all-mods` | Both `modrinth` and `curseforge` |
+| `events` | Typed broadcast events (`LaunchEvent`, `ModloaderEvent`, …) |
+| `keyring` | OS-keychain storage for auth tokens (opt-in) |
+| `tracing` | Structured logging via `tracing` |
+
+Mix and match:
+
+```bash
+cargo add lighty-launcher --features fabric,modrinth,events
+```
+
+## Documentation
+
+📚 **Full docs on GitBook**: <https://hamadi.gitbook.io/lightylauncher>
+
+Per-crate API reference next to the code:
+
+| Crate | What it does |
+|---|---|
+| [`lighty-core`](crates/core/README.md) | App state, HTTP, hashing, archive extract |
+| [`lighty-auth`](crates/auth/README.md) | Offline / Microsoft / Azuriom auth |
+| [`lighty-event`](crates/event/README.md) | Broadcast event bus |
+| [`lighty-java`](crates/java/README.md) | JRE download and discovery |
+| [`lighty-launch`](crates/launch/README.md) | Install orchestrator + game runner |
+| [`lighty-loaders`](crates/loaders/README.md) | Minecraft loader implementations |
+| [`lighty-modsloader`](crates/modsloader/docs/overview.md) | Mod sources + modpack parsers |
+| [`lighty-version`](crates/version/README.md) | Fluent `VersionBuilder` |
 
 ## Contributing
 
-Contributions are welcome! Please read the [Contributing Guide](CONTRIBUTING.md) before submitting a PR.
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+[MIT](LICENSE).
 
-## Related Projects
+## Related
 
-- **[LightyUpdater](https://github.com/Lighty-Launcher/LightyUpdater)** - Custom modpack server for LightyLauncher
+- **[LightyUpdater](https://github.com/Lighty-Launcher/LightyUpdater)** — companion server for custom modpack distribution.
+- **[FlowUpdater](https://github.com/FlowArg/FlowUpdater)** — Java launcher library by FlowArg, one of the early inspirations for this project.
+
+## Acknowledgements
+
+Special thanks to **[FlowArg](https://github.com/FlowArg)** whose work on FlowUpdater provided valuable guidance and direction in the early stages of this project.
+
+Thanks to everyone who has contributed — issues, PRs, and feedback all help make this library better.

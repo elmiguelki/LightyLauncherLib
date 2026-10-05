@@ -18,8 +18,8 @@ pub fn log(event: JavaEvent) {
                 distribution, version, total_bytes / 1_000_000
             );
         }
-        JavaEvent::JavaDownloadProgress { bytes } => {
-            print!("\r[Java] Download progress: {} MB", bytes / 1_000_000);
+        JavaEvent::JavaDownloadProgress { percent } => {
+            print!("\r[Java] Download progress: {:.1}%", percent);
             flush_stdout();
         }
         JavaEvent::JavaDownloadCompleted { distribution, version } => {

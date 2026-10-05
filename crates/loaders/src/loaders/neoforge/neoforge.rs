@@ -6,19 +6,21 @@ use zip::ZipArchive;
 use lighty_core::download::download_file_untracked;
 use lighty_core::mkdir;
 
-use crate::loaders::vanilla::vanilla::VanillaQuery;
+use crate::loaders::vanilla::vanilla::{
+    extract_arguments as vanilla_arguments, extract_main_class as vanilla_main_class,
+    VANILLA, VanillaQuery,
+};
 use crate::types::version_metadata::{Arguments, Library, MainClass, Version, VersionMetaData};
 use crate::types::VersionInfo;
 use crate::utils::forge_installer::{ForgeInstallProfile, ForgeVersionManifest};
 use crate::utils::maven::fetch_maven_sha1;
-use crate::utils::{error::QueryError, manifest::ManifestRepository, query::Query};
+use lighty_core::QueryError;
+use crate::utils::{manifest::ManifestRepository, query::Query};
 
-/// Maven repository for NeoForge artifacts. Published so the launch crate
-/// can configure the install-processor pipeline against the right Maven.
+/// Maven repository for NeoForge artifacts.
 pub const NEOFORGE_MAVEN: &str = "https://maven.neoforged.net/releases";
-/// Subdirectory under `libraries/` used to cache files extracted from the
-/// NeoForge installer JAR (keeps Forge / NeoForge extracts isolated).
-/// Published for the install-processor pipeline.
+/// Subdirectory under `libraries/` used to cache files extracted from
+/// the NeoForge installer JAR (keeps Forge / NeoForge extracts isolated).
 pub const NEOFORGE_EXTRACT_SUBDIR: &str = "net/neoforged";
 
 pub type Result<T> = std::result::Result<T, QueryError>;
@@ -29,13 +31,9 @@ pub static NEOFORGE: Lazy<ManifestRepository<NeoForgeQuery>> = Lazy::new(|| Mani
 /// Sub-queries supported by the NeoForge loader.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NeoForgeQuery {
-    /// Library list from `install_profile.json` (processor-side libraries).
     Libraries,
-    /// Game/JVM arguments (not yet implemented — falls through to `todo!()`).
     Arguments,
-    /// Main class (not yet implemented — falls through to `todo!()`).
     MainClass,
-    /// Full merged [`Version`] for a NeoForge instance.
     NeoForgeBuilder,
 }
 
@@ -50,7 +48,6 @@ impl Query for NeoForgeQuery {
     }
 
     async fn fetch_full_data<V: VersionInfo>(version: &V) -> Result<ForgeInstallProfile> {
-        // Build the installer URL
         let installer_url = build_installer_url(version);
 
         lighty_core::trace_debug!(url = %installer_url, loader = "neoforge", "Installer URL constructed");
@@ -60,7 +57,6 @@ impl Query for NeoForgeQuery {
 
         let installer_path = profiles_dir.join(format!("neoforge-{}-installer.jar", version.loader_version()));
 
-        // Verify cached installer and re-download if needed
         let needs_download = if installer_path.exists() {
             match verify_installer_sha1(&installer_path, &installer_url).await {
                 Ok(true) => {
@@ -97,7 +93,6 @@ impl Query for NeoForgeQuery {
             }
         }
 
-        // Read the embedded JSONs directly from the installer JAR (no disk extraction)
         let (install_profile, _) = read_jsons_from_jar(&installer_path).await?;
 
         lighty_core::trace_info!(loader = "neoforge", "Successfully loaded NeoForge metadata");
@@ -108,7 +103,14 @@ impl Query for NeoForgeQuery {
     async fn extract<V: VersionInfo>(version: &V, query: &Self::Query, full_data: &ForgeInstallProfile) -> Result<Self::Data> {
         let result = match query {
             NeoForgeQuery::Libraries => VersionMetaData::Libraries(extract_install_profile_libraries(full_data)),
-            &NeoForgeQuery::Arguments | &NeoForgeQuery::MainClass => todo!(),
+            NeoForgeQuery::MainClass => {
+                let version_meta = read_version_meta(version).await?;
+                VersionMetaData::MainClass(main_class(version, &version_meta).await?)
+            }
+            NeoForgeQuery::Arguments => {
+                let version_meta = read_version_meta(version).await?;
+                VersionMetaData::Arguments(arguments(version, &version_meta).await?)
+            }
             NeoForgeQuery::NeoForgeBuilder => {
                 VersionMetaData::Version(Self::version_builder(version, full_data).await?)
             }
@@ -117,33 +119,24 @@ impl Query for NeoForgeQuery {
     }
 
     async fn version_builder<V: VersionInfo>(version: &V, _full_data: &ForgeInstallProfile) -> Result<Version> {
-        // Fetch Vanilla data and read version.json from the installer JAR in parallel
         let (vanilla_builder, version_meta) = tokio::try_join!(
             async {
-                let vanilla_data = VanillaQuery::fetch_full_data(version).await?;
+                let vanilla_data = VANILLA.get_raw(version).await?;
                 VanillaQuery::version_builder(version, &vanilla_data).await
             },
-            async {
-                let profiles_dir = version.game_dirs().join(".neoforge");
-                let installer_path = profiles_dir.join(format!("neoforge-{}-installer.jar", version.loader_version()));
-                let (_, version_meta) = read_jsons_from_jar(&installer_path).await?;
-                Ok::<_, QueryError>(version_meta)
-            }
+            read_version_meta(version)
         )?;
 
-        // Use ONLY the runtime libraries from version.json.
-        // The libraries in install_profile.json are processor-only and
-        // must not end up on the launch classpath.
+        // Use ONLY runtime libraries from version.json. install_profile
+        // libraries are processor-only and must not end up on the classpath.
         let version_json_libs = extract_libraries_from_version_meta(&version_meta);
 
-        // Merge: Vanilla base + version.json overrides
         let merged_libs = merge_libraries(vanilla_builder.libraries, version_json_libs);
 
-        // Merge the rest with Vanilla as the base, NeoForge overriding where present
         Ok(Version {
-            main_class: merge_main_class(vanilla_builder.main_class, extract_main_class(&version_meta)),
+            main_class: main_class(version, &version_meta).await?,
             java_version: vanilla_builder.java_version,
-            arguments: merge_arguments(vanilla_builder.arguments, extract_arguments(&version_meta)),
+            arguments: arguments(version, &version_meta).await?,
             libraries: merged_libs,
             mods: None,
             natives: vanilla_builder.natives,
@@ -154,7 +147,42 @@ impl Query for NeoForgeQuery {
     }
 }
 
-/// --------- Merge helpers ----------
+/// Reads the `version.json` shipped inside the NeoForge installer JAR — the
+/// main class and arguments live there, not in the install profile.
+async fn read_version_meta<V: VersionInfo>(version: &V) -> Result<ForgeVersionManifest> {
+    let installer_path = version
+        .game_dirs()
+        .join(".neoforge")
+        .join(format!("neoforge-{}-installer.jar", version.loader_version()));
+    let (_, version_meta) = read_jsons_from_jar(&installer_path).await?;
+    Ok(version_meta)
+}
+
+/// NeoForge's main class merged with vanilla's, so the standalone query and the
+/// builder can never disagree.
+async fn main_class<V: VersionInfo>(
+    version: &V,
+    version_meta: &ForgeVersionManifest,
+) -> Result<MainClass> {
+    let vanilla_data = VANILLA.get_raw(version).await?;
+    Ok(merge_main_class(
+        vanilla_main_class(&vanilla_data),
+        extract_main_class(version_meta),
+    ))
+}
+
+/// Same contract as [`main_class`], for the argument lists.
+async fn arguments<V: VersionInfo>(
+    version: &V,
+    version_meta: &ForgeVersionManifest,
+) -> Result<Arguments> {
+    let vanilla_data = VANILLA.get_raw(version).await?;
+    Ok(merge_arguments(
+        vanilla_arguments(&vanilla_data),
+        extract_arguments(version_meta),
+    ))
+}
+
 fn merge_main_class(vanilla: MainClass, neoforge: MainClass) -> MainClass {
     if neoforge.main_class.is_empty() {
         vanilla
@@ -182,18 +210,17 @@ fn merge_arguments(vanilla: Arguments, neoforge: Arguments) -> Arguments {
     }
 }
 
-/// Merges library lists, de-duplicating by `group:artifact` (version-agnostic).
+/// Merges library lists, de-duplicating by `group:artifact[:classifier]`.
 fn merge_libraries(vanilla_libs: Vec<Library>, neoforge_libs: Vec<Library>) -> Vec<Library> {
     let capacity = vanilla_libs.len() + neoforge_libs.len();
     let mut lib_map: HashMap<String, Library> = HashMap::with_capacity(capacity);
 
-    // Insert Vanilla first
     for lib in vanilla_libs {
         let key = extract_artifact_key(&lib.name);
         lib_map.insert(key, lib);
     }
 
-    // NeoForge overrides Vanilla on key collision (typically a newer version)
+    // NeoForge overrides Vanilla on key collision (typically newer version).
     for lib in neoforge_libs {
         let key = extract_artifact_key(&lib.name);
         lib_map.insert(key, lib);
@@ -202,15 +229,11 @@ fn merge_libraries(vanilla_libs: Vec<Library>, neoforge_libs: Vec<Library>) -> V
     lib_map.into_values().collect()
 }
 
-/// Extracts the `group:artifact[:classifier]` (version-agnostic) key
-/// used for dedup. The classifier MUST stay in the key — NeoForge's
-/// version.json (inherited from the Forge schema) ships two libs with
-/// the same coordinates differing only by classifier (`:universal`
-/// and `:client`), and collapsing them to `group:artifact` would
-/// silently drop one (the FML system mod lives in `:universal`,
-/// dropping it makes FML crash with "Failed to find system mod").
-///
-/// Maven coords: `group:artifact:version[:classifier]`.
+/// Extracts the `group:artifact[:classifier]` key used for dedup.
+/// The classifier MUST stay in the key — NeoForge's version.json ships
+/// two libs with the same coords differing only by classifier
+/// (`:universal` and `:client`); collapsing them would drop the FML
+/// system mod and crash with "Failed to find system mod".
 fn extract_artifact_key(maven_name: &str) -> String {
     let parts: Vec<&str> = maven_name.split(':').collect();
     match parts.as_slice() {
@@ -222,7 +245,6 @@ fn extract_artifact_key(maven_name: &str) -> String {
     }
 }
 
-/// --------- Extraction helpers ----------
 fn extract_main_class(version_meta: &ForgeVersionManifest) -> MainClass {
     MainClass {
         main_class: version_meta.main_class.clone(),
@@ -230,9 +252,9 @@ fn extract_main_class(version_meta: &ForgeVersionManifest) -> MainClass {
 }
 
 fn extract_arguments(version_meta: &ForgeVersionManifest) -> Arguments {
-    // NeoForge always ships the structured `arguments` block; the
-    // `Option` here is forced by the shared `ForgeVersionManifest`
-    // schema (which also serves back-ported modern Forge installers).
+    // NeoForge always ships the structured `arguments` block; the Option
+    // here is forced by the shared `ForgeVersionManifest` schema (which
+    // also serves back-ported modern Forge installers).
     if let Some(args) = &version_meta.arguments {
         return Arguments {
             game: args.game.clone(),
@@ -243,12 +265,11 @@ fn extract_arguments(version_meta: &ForgeVersionManifest) -> Arguments {
 }
 
 /// Returns the install_profile.json libraries as the launcher's pivot
-/// [`Library`] type so they can be fed through the generic library
-/// installer (parallel download, retry, SHA1 verify).
+/// [`Library`] type.
 ///
 /// Includes both the processor JARs and the runtime-required artifacts
-/// (notably `net.neoforged:forge:VERSION:universal`, which is referenced
-/// at runtime by FML but absent from `version.json`).
+/// (notably `net.neoforged:forge:VERSION:universal`, referenced at
+/// runtime by FML but absent from `version.json`).
 pub fn extract_install_profile_libraries(full_data: &ForgeInstallProfile) -> Vec<Library> {
     full_data
         .libraries
@@ -277,16 +298,12 @@ fn extract_libraries_from_version_meta(version_meta: &ForgeVersionManifest) -> V
         .collect()
 }
 
-/// --------- Helpers ----------
 fn is_old_neoforge<V: VersionInfo>(version: &V) -> bool {
     version_compare::compare_to(version.minecraft_version(), "1.20.1", version_compare::Cmp::Le)
         .unwrap_or(false)
 }
 
 /// Builds the Maven URL of the NeoForge installer JAR for `version`.
-///
-/// Exposed so the launch crate can derive the SHA1-sidecar URL when it
-/// drives the install-processor pipeline.
 pub fn build_installer_url<V: VersionInfo>(version: &V) -> String {
     if is_old_neoforge(version) {
         let path_version = format!("{}-{}", version.minecraft_version(), version.loader_version());
@@ -311,9 +328,6 @@ pub fn build_installer_url<V: VersionInfo>(version: &V) -> String {
 }
 
 /// Returns the on-disk path where the NeoForge installer is cached.
-///
-/// Exposed so the launch crate can locate the cached installer when it
-/// drives the install-processor pipeline.
 pub fn installer_cache_path<V: VersionInfo>(version: &V) -> PathBuf {
     version
         .game_dirs()
@@ -335,7 +349,6 @@ async fn read_jsons_from_jar(installer_path: &PathBuf) -> Result<(ForgeInstallPr
             message: format!("Failed to open ZIP archive: {}", e)
         })?;
 
-        // Read install_profile.json
         let install_profile = {
             let mut file = archive.by_name("install_profile.json").map_err(|_| {
                 QueryError::MissingField {
@@ -351,7 +364,6 @@ async fn read_jsons_from_jar(installer_path: &PathBuf) -> Result<(ForgeInstallPr
             serde_json::from_str::<ForgeInstallProfile>(&contents)?
         };
 
-        // Read version.json
         let version_meta = {
             let mut file = archive.by_name("version.json").map_err(|_| {
                 QueryError::MissingField {

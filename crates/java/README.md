@@ -13,9 +13,8 @@ Automatic Java Runtime Environment (JRE) management for Minecraft launchers with
 
 ## Quick Start
 
-```toml
-[dependencies]
-lighty-java = "26.5.1"
+```bash
+cargo add lighty-java
 ```
 
 ### Basic Usage
@@ -135,10 +134,12 @@ async fn main() {
 | Guide | Description |
 |-------|-------------|
 | [Overview](./docs/overview.md) | Design and implementation details |
+| [How to use](./docs/how-to-use.md) | Common usage patterns |
 | [Distributions](./docs/distributions.md) | Deep dive into each Java distribution |
 | [Installation](./docs/installation.md) | Download and installation process |
 | [Runtime Execution](./docs/runtime.md) | Java process execution and I/O handling |
-| [Examples](./docs/examples.md) | Complete usage examples and patterns |
+| [Events](./docs/events.md) | `JavaEvent` variants |
+| [Exports](./docs/exports.md) | Public API surface |
 
 ## License
 

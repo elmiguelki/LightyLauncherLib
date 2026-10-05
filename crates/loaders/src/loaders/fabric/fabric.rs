@@ -1,7 +1,12 @@
 use crate::types::version_metadata::{ Library, MainClass, Arguments, Version, VersionMetaData};
 use crate::types::VersionInfo;
-use crate::utils::{error::QueryError, query::Query, manifest::ManifestRepository};
-use crate::loaders::vanilla::{vanilla::VanillaQuery};
+use lighty_core::QueryError;
+use crate::utils::{query::Query, manifest::ManifestRepository};
+use crate::utils::maven::{fetch_file_size, fetch_maven_sha1};
+use crate::loaders::vanilla::vanilla::{
+    extract_arguments as vanilla_arguments, extract_main_class as vanilla_main_class,
+    VANILLA, VanillaQuery,
+};
 use once_cell::sync::Lazy;
 use super::fabric_metadata::FabricMetaData;
 use async_trait::async_trait;
@@ -24,13 +29,9 @@ pub static FABRIC: Lazy<ManifestRepository<FabricQuery>> = Lazy::new(|| Manifest
 /// Sub-queries supported by the Fabric loader.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FabricQuery {
-    /// Merged library list (Fabric + Vanilla).
     Libraries,
-    /// Merged JVM/game argument list.
     Arguments,
-    /// Main class to launch.
     MainClass,
-    /// Full merged [`Version`] for a Fabric instance.
     FabricBuilder,
 }
 
@@ -68,8 +69,8 @@ impl Query for FabricQuery {
     async fn extract<V: VersionInfo>(version: &V, query: &Self::Query, full_data: &FabricMetaData) -> Result<Self::Data> {
         let result = match query {
             FabricQuery::Libraries => VersionMetaData::Libraries(extract_libraries(full_data).await?),
-            FabricQuery::Arguments => VersionMetaData::Arguments(extract_arguments(full_data)),
-            FabricQuery::MainClass => VersionMetaData::MainClass(extract_main_class(full_data)),
+            FabricQuery::Arguments => VersionMetaData::Arguments(arguments(version, full_data).await?),
+            FabricQuery::MainClass => VersionMetaData::MainClass(main_class(version, full_data).await?),
             FabricQuery::FabricBuilder => VersionMetaData::Version(Self::version_builder(version, full_data).await?),
         };
         Ok(result)
@@ -78,17 +79,16 @@ impl Query for FabricQuery {
     async fn version_builder<V: VersionInfo>(version: &V, full_data: &FabricMetaData) -> Result<Version> {
         let (vanilla_builder, fabric_libraries) = tokio::try_join!(
         async {
-            let vanilla_data = VanillaQuery::fetch_full_data(version).await?;
+            let vanilla_data = VANILLA.get_raw(version).await?;
             VanillaQuery::version_builder(version, &vanilla_data).await
         },
         extract_libraries(full_data)
     )?;
 
-        // Merge with Vanilla as the base, Fabric overriding where it provides a value
         Ok(Version {
-            main_class: merge_main_class(vanilla_builder.main_class, extract_main_class(full_data)),
+            main_class: main_class(version, full_data).await?,
             java_version: vanilla_builder.java_version,
-            arguments: merge_arguments(vanilla_builder.arguments, extract_arguments(full_data)),
+            arguments: arguments(version, full_data).await?,
             libraries: merge_libraries(vanilla_builder.libraries, fabric_libraries),
             mods: None,
             natives: vanilla_builder.natives,
@@ -97,6 +97,25 @@ impl Query for FabricQuery {
             assets: vanilla_builder.assets,
         })
     }
+}
+
+/// The loader's main class merged with vanilla's, so the standalone query and
+/// the builder can never disagree.
+async fn main_class<V: VersionInfo>(version: &V, full_data: &FabricMetaData) -> Result<MainClass> {
+    let vanilla_data = VANILLA.get_raw(version).await?;
+    Ok(merge_main_class(
+        vanilla_main_class(&vanilla_data),
+        extract_main_class(full_data),
+    ))
+}
+
+/// Same contract as [`main_class`], for the argument lists.
+async fn arguments<V: VersionInfo>(version: &V, full_data: &FabricMetaData) -> Result<Arguments> {
+    let vanilla_data = VANILLA.get_raw(version).await?;
+    Ok(merge_arguments(
+        vanilla_arguments(&vanilla_data),
+        extract_arguments(full_data),
+    ))
 }
 
 fn merge_main_class(vanilla: MainClass, fabric: MainClass) -> MainClass {
@@ -128,18 +147,16 @@ fn merge_arguments(vanilla: Arguments, fabric: Arguments) -> Arguments {
     }
 }
 
-/// Merges library lists, de-duplicating by `group:artifact` (version-agnostic).
+/// Merges library lists, de-duplicating by `group:artifact`. Fabric wins.
 fn merge_libraries(vanilla_libs: Vec<Library>, fabric_libs: Vec<Library>) -> Vec<Library> {
     let capacity = vanilla_libs.len() + fabric_libs.len();
     let mut lib_map: HashMap<String, Library> = HashMap::with_capacity(capacity);
 
-    // Insert Vanilla first
     for lib in vanilla_libs {
         let key = extract_artifact_key(&lib.name);
         lib_map.insert(key, lib);
     }
 
-    // Fabric overrides Vanilla on key collision (typically a newer version)
     for lib in fabric_libs {
         let key = extract_artifact_key(&lib.name);
         lib_map.insert(key, lib);
@@ -148,9 +165,6 @@ fn merge_libraries(vanilla_libs: Vec<Library>, fabric_libs: Vec<Library>) -> Vec
     lib_map.into_values().collect()
 }
 
-
-
-/// Extracts the `group:artifact` (version-agnostic) key used for dedup.
 fn extract_artifact_key(maven_name: &str) -> String {
     let mut parts = maven_name.split(':');
     match (parts.next(), parts.next()) {
@@ -159,7 +173,6 @@ fn extract_artifact_key(maven_name: &str) -> String {
     }
 }
 
-///-----------------------------
 /// Parallel-fetch implementation; returns `Result` for `tokio::try_join!`.
 async fn extract_libraries(full_data: &FabricMetaData) -> Result<Vec<Library>> {
     let futures = full_data.libraries.iter().map(|lib| {
@@ -172,7 +185,7 @@ async fn extract_libraries(full_data: &FabricMetaData) -> Result<Vec<Library>> {
             let base_url = lib_url.as_deref().unwrap_or(FABRIC_MAVEN);
             let (path, full_url) = maven_artifact_to_path_and_url(&lib_name, base_url);
 
-            // Fetch SHA1 / size from Maven only when missing from the manifest
+            // Only hit Maven for SHA1/size when the manifest didn't supply them.
             let (sha1, size) = if lib_sha1.is_none() || lib_size.is_none() {
                 tokio::join!(
                     async {
@@ -204,7 +217,6 @@ async fn extract_libraries(full_data: &FabricMetaData) -> Result<Vec<Library>> {
         }
     });
 
-    // Await all requests in parallel
     Ok(join_all(futures).await)
 }
 
@@ -216,16 +228,9 @@ fn maven_artifact_to_path_and_url(maven_name: &str, base_url: &str) -> (String, 
         _ => return (String::new(), String::new()),
     };
 
-    // Convert group.id to a path (e.g. "org.ow2.asm" -> "org/ow2/asm")
     let group_path = group_id.replace('.', "/");
-
-    // Build the JAR filename
     let jar_name = format!("{}-{}.jar", artifact_id, version);
-
-    // Build the relative path
     let path = format!("{}/{}/{}/{}", group_path, artifact_id, version, jar_name);
-
-    // Build the full URL
     let base = base_url.trim_end_matches('/');
     let full_url = format!("{}/{}", base, path);
 
@@ -262,43 +267,6 @@ async fn fetch_json_with_fallback<T: DeserializeOwned>(url: &str) -> Result<T> {
     })
 }
 
-/// Récupère le SHA1 d'un artifact Maven depuis le fichier .sha1
-async fn fetch_maven_sha1(jar_url: &str) -> Option<String> {
-    for candidate in build_fallback_urls(jar_url) {
-        let sha1_url = format!("{}.sha1", candidate);
-
-        if let Ok(response) = CLIENT.get(&sha1_url).send().await {
-            if response.status().is_success() {
-                if let Ok(text) = response.text().await {
-                    if let Some(sha1) = text.trim().split_whitespace().next() {
-                        if sha1.len() == 40 {
-                            return Some(sha1.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Récupère la taille d'un fichier sans le télécharger (HEAD request)
-async fn fetch_file_size(url: &str) -> Option<u64> {
-    for candidate in build_fallback_urls(url) {
-        if let Ok(response) = CLIENT.head(&candidate).send().await {
-            if let Some(value) = response.headers().get("content-length") {
-                if let Ok(text) = value.to_str() {
-                    if let Ok(size) = text.parse() {
-                        return Some(size);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
 fn extract_arguments(full_data: &FabricMetaData) -> Arguments {
     Arguments {
         game: full_data.arguments.game.clone(),

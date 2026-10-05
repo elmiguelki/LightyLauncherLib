@@ -72,3 +72,91 @@ pub type DownloadResult<T> = Result<T, DownloadError>;
 
 /// Type alias for app state operations results
 pub type AppStateResult<T> = Result<T, AppStateError>;
+
+/// Errors returned by every loader / mods query operation.
+#[derive(Error, Debug)]
+pub enum QueryError {
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+
+    #[error("JSON parsing error: {0}")]
+    JsonParsing(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Version '{version}' not found in manifest")]
+    VersionNotFound { version: String },
+
+    #[error("Missing field '{field}' in manifest data")]
+    MissingField { field: String },
+
+    #[error("Assets fetch error: failed to fetch assets from URL '{url}'")]
+    AssetsFetch { url: String },
+
+    #[error("Conversion error: {message}")]
+    Conversion { message: String },
+
+    #[error("Archive corrupted ({context}): {reason}")]
+    ArchiveCorrupted { context: String, reason: String },
+
+    #[error("Unsupported {what}: expected {expected}, found {found}")]
+    UnsupportedFormat {
+        what: String,
+        expected: String,
+        found: String,
+    },
+
+    #[error("Unknown loader '{name}'")]
+    UnknownLoader { name: String },
+
+    #[error("{loader} for Minecraft {minecraft_version} predates the installer format")]
+    LoaderTooOld {
+        loader: &'static str,
+        minecraft_version: String,
+    },
+
+    #[error("{provider} does not host mods for {loader} instances")]
+    LoaderNotOnProvider {
+        provider: &'static str,
+        loader: String,
+    },
+
+    #[error("{provider} support is disabled: enable the '{feature}' cargo feature")]
+    ProviderDisabled {
+        provider: &'static str,
+        feature: &'static str,
+    },
+
+    #[error("{operation} is not supported for {loader}, or its cargo feature is off")]
+    OperationUnsupported {
+        operation: &'static str,
+        loader: String,
+    },
+
+    #[error("{operation} requires the '{feature}' cargo feature")]
+    FeatureRequired {
+        operation: &'static str,
+        feature: &'static str,
+    },
+
+    #[error("Invalid metadata format")]
+    InvalidMetadata,
+
+    #[error("Mod not found on {provider}: {id}")]
+    ModNotFound { provider: &'static str, id: String },
+
+    #[error("Mod {id} on {provider} has no version compatible with Minecraft {mc} + loader {loader}")]
+    ModIncompatible {
+        provider: &'static str,
+        id: String,
+        mc: String,
+        loader: String,
+    },
+
+    #[error("Mod {id} on CurseForge disallows third-party distribution; download manually from the project page")]
+    ModDistributionForbidden { id: String },
+}
+
+/// Type alias for query operations results.
+pub type QueryResult<T> = Result<T, QueryError>;

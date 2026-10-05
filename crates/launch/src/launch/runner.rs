@@ -9,12 +9,11 @@ use lighty_event::EventBus;
 use lighty_java::jre_downloader::{find_java_binary, jre_download};
 use lighty_java::runtime::JavaRuntime;
 use lighty_java::JavaDistribution;
-#[cfg(not(feature = "events"))]
-use lighty_java::JreError;
 use lighty_loaders::types::version_metadata::{Version, VersionMetaData};
 use lighty_loaders::types::{Loader, LoaderExtensions, VersionInfo};
+use lighty_modsloader::WithMods;
 
-use crate::arguments::{Arguments, KEY_GAME_DIRECTORY};
+use crate::arguments::Arguments;
 use crate::errors::{InstallerError, InstallerResult};
 use crate::installer::Installer;
 
@@ -83,10 +82,19 @@ pub trait Launch {
         Self: Sized;
 }
 
-// Blanket impl for any type that implements VersionInfo plus the required traits
+// Blanket impl for any type that implements the launch pipeline traits.
+//
+// `WithMods` is always required (provides `mod_requests()` — defaults to
+// `&[]` for types that don't track mods, so it's free for vanilla
+// instances). Modrinth / CurseForge / modpack features only gate which
+// builder methods exist and which API clients compile in.
 impl<T> Launch for T
 where
-    T: VersionInfo<LoaderType = Loader> + LoaderExtensions + Arguments + Installer,
+    T: VersionInfo<LoaderType = Loader>
+        + LoaderExtensions
+        + Arguments
+        + Installer
+        + WithMods,
 {
     fn launch<'a>(
         &'a mut self,
@@ -110,7 +118,11 @@ pub(crate) async fn execute_launch<T>(
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
 ) -> InstallerResult<()>
 where
-    T: VersionInfo<LoaderType = Loader> + LoaderExtensions + Arguments + Installer,
+    T: VersionInfo<LoaderType = Loader>
+        + LoaderExtensions
+        + Arguments
+        + Installer
+        + WithMods,
 {
     // 1. Fetch the loader metadata
     let metadata = prepare_metadata(
@@ -151,44 +163,9 @@ where
         }
     }
 
-    // Resolve user-attached mods (Modrinth / CurseForge) and
-    // merge them into the pivot before install. Skipped when both
-    // source features are off (the builder methods are gated too,
-    // so `mod_requests()` is always empty in that case).
-    #[cfg(any(feature = "modrinth", feature = "curseforge"))]
-    let _merged_owned;
-    #[cfg(any(feature = "modrinth", feature = "curseforge"))]
-    let version_data: &Version = {
-        let user_mods = crate::installer::ressources::mod_resolver::resolve_user_mods(
-            version.mod_requests(),
-            version.minecraft_version(),
-            version.loader(),
-            #[cfg(feature = "events")]
-            event_bus,
-        )
-        .await?;
-        if user_mods.is_empty() {
-            version_data
-        } else {
-            let mut merged = version_data.clone();
-            match &mut merged.mods {
-                Some(existing) => existing.extend(user_mods),
-                slot => *slot = Some(user_mods),
-            }
-            _merged_owned = merged;
-            &_merged_owned
-        }
-    };
-
-    // 2. Make sure Java is installed
-    let java_path = ensure_java_installed(
-        version,
-        version_data,
-        &java_distribution,
-        #[cfg(feature = "events")]
-        event_bus,
-    )
-    .await?;
+    // Modpack + user-attached mods are resolved by `Installer::install`
+    // itself (Phase 0 of its pipeline). The runner just passes the raw
+    // `Version` here — no merge to do.
 
     // 3. Install Minecraft dependencies (libraries, natives, client, assets)
     // Before install, ensure the asset index exists on disk (with fallbacks).
@@ -213,46 +190,50 @@ where
     // execution stays inside each loader crate (it's a per-loader
     // Java exec with different maven URLs / extract subdirs).
     //
-    // TODO: generalize this into a per-loader post-install hook for any
-    // loader that needs one (currently only Forge / NeoForge do).
+    // A LightyUpdater builder carries a server URL where the loader version
+    // belongs and no Minecraft version, so the installer paths and cache keys
+    // below have to be built from the resolved coordinates, not from it.
+    #[cfg(any(feature = "forge", feature = "neoforge"))]
+    let resolved = version.resolved_instance().await?;
+
     #[cfg(feature = "neoforge")]
-    if matches!(version.loader(), Loader::NeoForge) {
-        let install_profile = NEOFORGE.get_raw(version).await?;
+    if matches!(resolved.loader(), Loader::NeoForge) {
+        let install_profile = NEOFORGE.get_raw(&resolved).await?;
         let profile_libs = neoforge_install_profile_libraries(install_profile.as_ref());
-        let profile_tasks = collect_library_tasks(version, &profile_libs).await;
+        let profile_tasks = collect_library_tasks(&resolved, &profile_libs).await;
         download_libraries(
             profile_tasks,
             #[cfg(feature = "events")]
             event_bus,
         )
         .await?;
-        run_neoforge_install_processors(version, install_profile.as_ref(), java_path.clone())
+        run_neoforge_install_processors(&resolved, install_profile.as_ref(), java_path.clone())
             .await?;
     }
 
     #[cfg(feature = "forge")]
-    if matches!(version.loader(), Loader::Forge) {
-        let raw = FORGE.get_raw(version).await?;
+    if matches!(resolved.loader(), Loader::Forge) {
+        let raw = FORGE.get_raw(&resolved).await?;
         match raw.as_ref() {
             ForgeRawData::Modern {
                 install_profile, ..
             } => {
                 // Download processor-only libraries, then run processors.
                 let profile_libs = forge_install_profile_libraries_modern(install_profile);
-                let profile_tasks = collect_library_tasks(version, &profile_libs).await;
+                let profile_tasks = collect_library_tasks(&resolved, &profile_libs).await;
                 download_libraries(
                     profile_tasks,
                     #[cfg(feature = "events")]
                     event_bus,
                 )
                 .await?;
-                run_forge_install_processors(version, install_profile, java_path.clone()).await?;
+                run_forge_install_processors(&resolved, install_profile, java_path.clone()).await?;
             }
             ForgeRawData::Legacy(profile) => {
                 // No processors in the legacy era; the universal JAR
                 // ships inside the installer and must be extracted to
                 // its Maven path so the classpath entry resolves.
-                forge_legacy_extract_universal_jar(version, profile).await?;
+                forge_legacy_extract_universal_jar(&resolved, profile).await?;
             }
         }
     }
@@ -392,7 +373,7 @@ where
             lighty_core::trace_debug!("[Java] Download progress: {}/{}", current, total);
         },
         event_bus,
-    ).await.map_err(|e| InstallerError::DownloadFailed(format!("JRE download failed: {}", e)))?;
+    ).await?;
 
     #[cfg(not(feature = "events"))]
     let path = jre_download(
@@ -402,7 +383,7 @@ where
         |current, total| {
             lighty_core::trace_debug!("[Java] Download progress: {}/{}", current, total);
         },
-    ).await.map_err(|e : JreError | InstallerError::DownloadFailed(format!("JRE download failed: {}", e)))?;
+    ).await?;
 
     lighty_core::trace_info!("[Java] Java {} installed successfully", java_version);
     Ok(path)
@@ -417,7 +398,7 @@ async fn validate_java_binary(path: &std::path::Path) -> bool {
     // process exits successfully and emits some output (stdout or stderr).
     // Build a platform-aware command to avoid flashing a console on Windows
     #[cfg(windows)]
-    let mut std_cmd = {
+    let std_cmd = {
         use std::process::Command as StdCommand;
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -429,7 +410,7 @@ async fn validate_java_binary(path: &std::path::Path) -> bool {
     };
 
     #[cfg(not(windows))]
-    let mut std_cmd = {
+    let std_cmd = {
         use std::process::Command as StdCommand;
         let mut c = StdCommand::new(path);
         c.arg("-version");
@@ -483,17 +464,9 @@ where
         raw_args,
     );
 
-    // Determine the effective runtime directory.
-    // If an explicit `game_directory` override exists, launch from it.
-    let mut runtime_dir = if let Some(dir) = arg_overrides.get(KEY_GAME_DIRECTORY) {
-        let path = PathBuf::from(dir);
-        lighty_core::trace_info!("[Launch] Using overridden game_directory as runtime_dir: {:?}", path);
-        path
-    } else {
-        let path = builder.game_dirs().join("runtime");
-        lighty_core::trace_info!("[Launch] Using default runtime_dir from game_dirs(): {:?}", path);
-        path
-    };
+    // Launch from the effective runtime directory: the runner already
+    // reconciled arg_overrides[KEY_GAME_DIRECTORY] onto runtime_dir().
+    let runtime_dir = builder.runtime_dir().to_path_buf();
 
     if !runtime_dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&runtime_dir) {
@@ -528,7 +501,12 @@ where
                 started_at: std::time::SystemTime::now(),
             };
 
-            INSTANCE_MANAGER.register_instance(instance).await;
+            if let Err(e) = INSTANCE_MANAGER.register_instance(instance).await {
+                lighty_core::trace_warn!(
+                    error = %e,
+                    "Failed to register launched instance — process keeps running"
+                );
+            }
 
             // Emit InstanceLaunched event
             #[cfg(feature = "events")]
@@ -577,10 +555,7 @@ where
         }
         Err(e) => {
             lighty_core::trace_error!("[Launch] Failed to launch game: {}", e);
-            Err(InstallerError::DownloadFailed(format!(
-                "Launch failed: {}",
-                e
-            )))
+            Err(e.into())
         }
     }
 }
@@ -658,108 +633,4 @@ where
     }
 
     Ok(())
-}
-
-/// Détecte l'apparition de la fenêtre du jeu et émet un événement
-#[cfg(feature = "events")]
-async fn detect_window_appearance(
-    pid: u32,
-    instance_name: String,
-    version: String,
-    event_bus: lighty_event::EventBus,
-) {
-    #[cfg(windows)]
-    {
-        use std::time::Duration;
-
-        // Vérifier toutes les 100ms pendant 30 secondes maximum
-        let max_attempts = 300;
-        let check_interval = Duration::from_millis(100);
-
-        for _ in 0..max_attempts {
-            if has_visible_window(pid) {
-                lighty_core::trace_info!("[Launch] Window appeared for PID: {}", pid);
-
-                event_bus.emit(lighty_event::Event::InstanceWindowAppeared(
-                    lighty_event::InstanceWindowAppearedEvent {
-                        pid,
-                        instance_name,
-                        version,
-                        timestamp: std::time::SystemTime::now(),
-                    }
-                ));
-                return;
-            }
-
-            tokio::time::sleep(check_interval).await;
-        }
-
-        lighty_core::trace_warn!("[Launch] Window detection timed out for PID: {}", pid);
-    }
-
-    #[cfg(not(windows))]
-    {
-        // Sur les autres plateformes, attendre un délai fixe (approximation)
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-        lighty_core::trace_info!(
-            "[Launch] Assuming window appeared for PID: {} (non-Windows platform)",
-            pid
-        );
-
-        event_bus.emit(lighty_event::Event::InstanceWindowAppeared(
-            lighty_event::InstanceWindowAppearedEvent {
-                pid,
-                instance_name,
-                version,
-                timestamp: std::time::SystemTime::now(),
-            }
-        ));
-    }
-}
-
-/// Vérifie si un processus a une fenêtre visible (Windows uniquement)
-#[cfg(all(windows, feature = "events"))]
-fn has_visible_window(pid: u32) -> bool {
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
-    };
-
-    struct EnumData {
-        target_pid: u32,
-        found: bool,
-    }
-
-    unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let data = &mut *(lparam.0 as *mut EnumData);
-
-        // Vérifier si la fenêtre est visible
-        if IsWindowVisible(hwnd).as_bool() {
-            let mut window_pid: u32 = 0;
-            GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
-
-            if window_pid == data.target_pid {
-                data.found = true;
-                return BOOL(0); // Arrêter l'énumération
-            }
-        }
-
-        BOOL(1) // Continuer l'énumération
-    }
-
-    let mut data = EnumData {
-        target_pid: pid,
-        found: false,
-    };
-
-    unsafe {
-        let _ = EnumWindows(
-            Some(enum_window_callback),
-            LPARAM(&mut data as *mut _ as isize),
-        );
-    }
-
-    data.found
 }

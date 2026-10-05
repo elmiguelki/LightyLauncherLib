@@ -3,7 +3,7 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_zip::tokio::read::seek::ZipFileReader;
 use futures_util::io::{self, BufReader as FuturesBufReader};
 use futures_util::StreamExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tokio::fs::{create_dir_all, OpenOptions};
 use tokio::io::AsyncBufRead;
 use tokio::io::{AsyncRead, AsyncSeek, BufReader};
@@ -12,19 +12,12 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 #[cfg(feature = "events")]
 use lighty_event::{EventBus, Event, CoreEvent};
 
-// Maximum file size: 2GB (protection against zip bombs)
+// 2GB cap protects against zip bombs.
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
-// Buffer size for extraction: 256KB
 const BUFFER_SIZE: usize = 256 * 1024;
 
-/// Extracts everything from the ZIP archive to the output directory
-///
-/// Security features:
-/// - Path traversal protection
-/// - Symlink/hardlink rejection
-/// - Absolute path rejection
-/// - File size limits (2GB max)
-/// - Path sanitization
+/// Extracts a ZIP archive to `out_dir` with path-traversal, symlink and
+/// size-bomb protection.
 pub async fn zip_extract<R>(
     archive: R,
     out_dir: &Path,
@@ -33,7 +26,7 @@ pub async fn zip_extract<R>(
 where
     R: AsyncRead + AsyncSeek + Unpin + AsyncBufRead,
 {
-    let out_dir = out_dir.canonicalize()?; // Normalize base directory
+    let out_dir = out_dir.canonicalize()?;
     let mut reader = ZipFileReader::new(archive.compat()).await?;
 
     let entries_count = reader.file().entries().len();
@@ -48,7 +41,7 @@ where
     }
 
     for index in 0..entries_count {
-        // Collect entry metadata before mutably borrowing reader
+        // Collect entry metadata before mutably borrowing reader.
         let (_file_name, path, is_dir, uncompressed_size) = {
             let entry = reader.file().entries().get(index)
                 .ok_or_else(|| ExtractError::ZipEntryNotFound { index })?;
@@ -57,10 +50,8 @@ where
             let is_dir = entry.dir()?;
             let uncompressed_size = entry.uncompressed_size();
 
-            // Sanitize and build path
             let sanitized = sanitize_file_path(file_name);
 
-            // Reject absolute paths early
             if sanitized.is_absolute() {
                 return Err(ExtractError::AbsolutePath {
                     path: file_name.to_string()
@@ -69,8 +60,7 @@ where
 
             let path = out_dir.join(&sanitized);
 
-            // Validate path doesn't escape out_dir using path components
-            if !is_path_within_base(&path, &out_dir)? {
+            if !is_path_within_base(&path, &out_dir) {
                 return Err(ExtractError::PathTraversal {
                     path: file_name.to_string()
                 });
@@ -79,12 +69,9 @@ where
             (file_name.to_string(), path, is_dir, uncompressed_size)
         };
 
-        // Now extract - mutably borrow reader
         if is_dir {
-            // Create directory
             create_dir_all(&path).await?;
         } else {
-            // Check file size (zip bomb protection)
             if uncompressed_size > MAX_FILE_SIZE {
                 return Err(ExtractError::FileTooLarge {
                     size: uncompressed_size,
@@ -92,12 +79,10 @@ where
                 });
             }
 
-            // Create parent directories if needed
             if let Some(parent) = path.parent() {
                 create_dir_all(parent).await?;
             }
 
-            // Extract file with buffering
             let entry_reader = reader.reader_with_entry(index).await?;
             let buffered_reader = FuturesBufReader::with_capacity(BUFFER_SIZE, entry_reader);
 
@@ -108,11 +93,9 @@ where
                 .open(&path)
                 .await?;
 
-            // Copy with buffering for performance
             io::copy(buffered_reader, &mut file.compat_write()).await?;
         }
 
-        // Emit progress event every 10 files
         #[cfg(feature = "events")]
         if let Some(bus) = event_bus {
             if (index + 1) % 10 == 0 || (index + 1) == entries_count {
@@ -135,13 +118,8 @@ where
     Ok(())
 }
 
-/// Extracts tar.gz archive to the output directory
-///
-/// Security features:
-/// - Path traversal protection
-/// - Symlink/hardlink rejection
-/// - Absolute path rejection
-/// - File size limits (2GB max)
+/// Extracts a tar.gz archive to `out_dir` with path-traversal, symlink and
+/// size-bomb protection.
 pub async fn tar_gz_extract<R>(
     archive: R,
     out_dir: &Path,
@@ -158,12 +136,11 @@ where
     if let Some(bus) = event_bus {
         bus.emit(Event::Core(CoreEvent::ExtractionStarted {
             archive_type: "TAR.GZ".to_string(),
-            file_count: 0, // Unknown for tar.gz until we iterate
+            file_count: 0,
             destination: out_dir.to_string_lossy().to_string(),
         }));
     }
 
-    // Manual extraction with validation
     let mut entries = ar.entries()?;
     #[cfg(feature = "events")]
     let mut files_extracted = 0usize;
@@ -172,25 +149,21 @@ where
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
 
-        // Reject absolute paths
         if path.is_absolute() {
             continue;
         }
 
         let dest = out_dir.join(&path);
 
-        // Path traversal protection - use robust validation
-        if !is_path_within_base(&dest, &out_dir)? {
+        if !is_path_within_base(&dest, &out_dir) {
             continue;
         }
 
-        // Skip symlinks and hard links for security
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             continue;
         }
 
-        // Check file size (protection against tar bombs)
         let size = entry.header().size()?;
         if size > MAX_FILE_SIZE {
             return Err(ExtractError::FileTooLarge {
@@ -199,7 +172,6 @@ where
             });
         }
 
-        // Extract safely
         entry.unpack(&dest).await?;
 
         #[cfg(feature = "events")]
@@ -207,13 +179,12 @@ where
             files_extracted += 1;
         }
 
-        // Emit progress event every 10 files
         #[cfg(feature = "events")]
         if let Some(bus) = event_bus {
             if files_extracted % 10 == 0 {
                 bus.emit(Event::Core(CoreEvent::ExtractionProgress {
                     files_extracted,
-                    total_files: 0, // Unknown for tar.gz
+                    total_files: 0,
                 }));
             }
         }
@@ -232,9 +203,7 @@ where
 
 /// Returns a relative path without reserved names, redundant separators, ".", or "..".
 fn sanitize_file_path(path: &str) -> PathBuf {
-    // Replaces backwards slashes
     path.replace('\\', "/")
-        // Sanitizes each component
         .split('/')
         .map(sanitize_filename::sanitize)
         .collect()
@@ -242,33 +211,24 @@ fn sanitize_file_path(path: &str) -> PathBuf {
 
 /// Validates that `path` resolves inside `base` using component folding.
 ///
-/// Used during extraction (before the file exists on disk), so we cannot
-/// rely on [`std::fs::canonicalize`]. Instead we walk the components,
-/// popping on `..`, and verify the normalized form starts with the
-/// normalized base.
-fn is_path_within_base(path: &Path, base: &Path) -> ExtractResult<bool> {
-    // Normalize both paths by collecting components
-    let normalized_path: PathBuf = path.components()
-        .fold(PathBuf::new(), |mut acc, component| {
-            match component {
-                std::path::Component::Normal(c) => acc.push(c),
-                std::path::Component::ParentDir => { acc.pop(); },
-                std::path::Component::CurDir => {},
-                _ => acc.push(component),
-            }
-            acc
-        });
+/// The path does not exist yet at call time, so [`std::fs::canonicalize`]
+/// is not an option.
+pub fn is_path_within_base(path: &Path, base: &Path) -> bool {
+    normalize(path).starts_with(normalize(base))
+}
 
-    let normalized_base: PathBuf = base.components()
-        .fold(PathBuf::new(), |mut acc, component| {
+/// Folds `..` and `.` away without touching the filesystem.
+fn normalize(path: &Path) -> PathBuf {
+    path.components()
+        .fold(PathBuf::new(), |mut normalized, component| {
             match component {
-                std::path::Component::Normal(c) => acc.push(c),
-                std::path::Component::ParentDir => { acc.pop(); },
-                std::path::Component::CurDir => {},
-                _ => acc.push(component),
+                Component::Normal(segment) => normalized.push(segment),
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::CurDir => {}
+                _ => normalized.push(component),
             }
-            acc
-        });
-
-    Ok(normalized_path.starts_with(&normalized_base))
+            normalized
+        })
 }
