@@ -34,8 +34,12 @@ pub enum InstallerError {
     #[error("Partial file for {url} is longer than the file itself")]
     StalePartialFile { url: String },
 
-    #[error("Download of {url} failed after {attempts} attempts")]
-    RetriesExhausted { attempts: u32, url: String },
+    #[error("Download of {url} failed after {attempts} attempts: {reason}")]
+    RetriesExhausted {
+        attempts: u32,
+        url: String,
+        reason: String,
+    },
 
     #[error("Response from {url} is not a valid JAR/ZIP archive")]
     InvalidArchive { url: String },

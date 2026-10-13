@@ -4,8 +4,8 @@
 //! File download utilities with retry logic and concurrency control
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(feature = "events")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use reqwest::header::RANGE;
 use reqwest::StatusCode;
@@ -14,7 +14,7 @@ use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
-use futures::future::try_join_all;
+use futures::future::join_all;
 use futures::StreamExt;
 use lighty_core::calculate_sha1_bytes;
 use lighty_core::hosts::{HTTP_CLIENT as CLIENT, build_fallback_urls};
@@ -88,6 +88,64 @@ fn calculate_retry_delay(base_delay_ms: u64, attempt: u32) -> u64 {
     exponential_delay + jitter
 }
 
+/// Renders an error with its source chain: reqwest's own message stops at
+/// "error sending request" and leaves the timeout or reset in the source.
+fn describe(error: &InstallerError) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        // `#[from]` variants already print their source in their own message.
+        if !text.ends_with(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+
+    text
+}
+
+/// Last failure per source, so the final error names the official host
+/// rather than whichever mirror happened to be tried last.
+#[derive(Default)]
+struct SourceFailures {
+    primary: Option<InstallerError>,
+    mirror: Option<InstallerError>,
+}
+
+impl SourceFailures {
+    fn record(&mut self, candidate: &str, url: &str, error: InstallerError) {
+        if candidate == url {
+            self.primary = Some(error);
+        } else {
+            lighty_core::trace_warn!(
+                "[Mirror] Failed to download via {}: {}",
+                candidate,
+                describe(&error)
+            );
+            self.mirror = Some(error);
+        }
+    }
+
+    fn into_error(self, url: &str, attempts: u32) -> InstallerError {
+        let reason = match (&self.primary, &self.mirror) {
+            (Some(primary), Some(mirror)) => {
+                format!("{}; mirror: {}", describe(primary), describe(mirror))
+            }
+            (Some(error), None) | (None, Some(error)) => describe(error),
+            (None, None) => "no attempt was made".to_string(),
+        };
+
+        InstallerError::RetriesExhausted {
+            attempts,
+            url: url.to_string(),
+            reason,
+        }
+    }
+}
+
 /// Downloads small files (loaded entirely in memory)
 pub async fn download_small_file(
     url: &str,
@@ -96,7 +154,7 @@ pub async fn download_small_file(
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
 ) -> InstallerResult<()> {
     let config = get_config();
-    let mut last_error = None;
+    let mut failures = SourceFailures::default();
     let candidates = build_fallback_urls(url);
 
     for attempt in 1..=config.max_retries {
@@ -111,16 +169,7 @@ pub async fn download_small_file(
             .await
             {
                 Ok(_) => return Ok(()),
-                Err(e) => {
-                    if candidates.len() > 1 && candidate != url {
-                        lighty_core::trace_warn!(
-                            "[Mirror] Failed to download via {}: {}",
-                            candidate,
-                            e
-                        );
-                    }
-                    last_error = Some(e);
-                }
+                Err(e) => failures.record(candidate, url, e),
             }
         }
 
@@ -138,10 +187,7 @@ pub async fn download_small_file(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| InstallerError::RetriesExhausted {
-        attempts: config.max_retries,
-        url: url.to_string(),
-    }))
+    Err(failures.into_error(url, config.max_retries))
 }
 
 async fn download_small_file_once(
@@ -191,7 +237,14 @@ async fn download_small_file_once(
         mkdir!(parent);
     }
 
-    fs::write(dest, bytes).await?;
+    // Rename into place: the object store trusts any non-empty file, so a
+    // write cut short by a crash would otherwise pass for a valid asset.
+    let mut partial = dest.as_os_str().to_owned();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
+
+    fs::write(&partial, bytes).await?;
+    fs::rename(&partial, dest).await?;
     Ok(())
 }
 
@@ -203,7 +256,7 @@ pub async fn download_large_file(
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
 ) -> InstallerResult<()> {
     let config = get_config();
-    let mut last_error = None;
+    let mut failures = SourceFailures::default();
     let candidates = build_fallback_urls(url);
 
     for attempt in 1..=config.max_retries {
@@ -218,16 +271,7 @@ pub async fn download_large_file(
             .await
             {
                 Ok(_) => return Ok(()),
-                Err(e) => {
-                    if candidates.len() > 1 && candidate != url {
-                        lighty_core::trace_warn!(
-                            "[Mirror] Failed to download via {}: {}",
-                            candidate,
-                            e
-                        );
-                    }
-                    last_error = Some(e);
-                }
+                Err(e) => failures.record(candidate, url, e),
             }
         }
 
@@ -245,10 +289,7 @@ pub async fn download_large_file(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| InstallerError::RetriesExhausted {
-        attempts: config.max_retries,
-        url: url.to_string(),
-    }))
+    Err(failures.into_error(url, config.max_retries))
 }
 
 async fn download_large_file_once(
@@ -379,14 +420,105 @@ async fn seed_hasher(dest: &Path, hasher: &mut Sha1) -> InstallerResult<()> {
     Ok(())
 }
 
-/// Downloads multiple large files with concurrency limit
-pub async fn download_with_concurrency_limit(
+/// How a batch moves each file: whole in memory, or streamed to disk with resume.
+#[derive(Copy, Clone)]
+enum Transfer {
+    InMemory,
+    Streamed,
+}
+
+/// Failures in a row, with no success in between, after which a pass stops
+/// starting downloads: the link is down rather than flaky.
+const MAX_CONSECUTIVE_FAILURES: usize = 8;
+
+/// Parallelism of the second pass over the files the first one could not get.
+const RECOVERY_CONCURRENCY: usize = 4;
+
+/// A task a pass did not complete; `error` is `None` when the pass had
+/// already given up by the time its turn came.
+struct Unfinished<'t, 'a> {
+    task: &'t DownloadTask<'a>,
+    error: Option<InstallerError>,
+}
+
+/// Runs every task and reports the ones that did not complete, instead of
+/// dropping the whole batch on the first failure.
+async fn run_pass<'t, 'a>(
+    tasks: Vec<&'t DownloadTask<'a>>,
+    transfer: Transfer,
+    concurrency: usize,
+    #[cfg(feature = "events")] event_bus: Option<&EventBus>,
+    #[cfg(feature = "events")] progress: Option<&ProgressState<'_>>,
+) -> Vec<Unfinished<'t, 'a>> {
+    let semaphore = &Semaphore::new(concurrency.max(1));
+    let failure_streak = &AtomicUsize::new(0);
+
+    let futures = tasks.into_iter().map(|task| async move {
+        let Ok(_permit) = semaphore.acquire().await else {
+            return Some(Unfinished {
+                task,
+                error: Some(InstallerError::ConcurrencyClosed),
+            });
+        };
+
+        if failure_streak.load(Ordering::Relaxed) >= MAX_CONSECUTIVE_FAILURES {
+            return Some(Unfinished { task, error: None });
+        }
+
+        let result = match transfer {
+            Transfer::InMemory => {
+                download_small_file(
+                    task.url,
+                    &task.dest,
+                    task.sha1,
+                    #[cfg(feature = "events")]
+                    event_bus,
+                )
+                .await
+            }
+            Transfer::Streamed => {
+                download_large_file(
+                    task.url,
+                    &task.dest,
+                    task.sha1,
+                    #[cfg(feature = "events")]
+                    event_bus,
+                )
+                .await
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                failure_streak.store(0, Ordering::Relaxed);
+
+                #[cfg(feature = "events")]
+                if let Some(progress) = progress {
+                    progress.emit_progress();
+                }
+
+                None
+            }
+            Err(error) => {
+                failure_streak.fetch_add(1, Ordering::Relaxed);
+                Some(Unfinished {
+                    task,
+                    error: Some(error),
+                })
+            }
+        }
+    });
+
+    join_all(futures).await.into_iter().flatten().collect()
+}
+
+async fn download_batch(
     tasks: Vec<DownloadTask<'_>>,
+    transfer: Transfer,
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
     #[cfg(feature = "events")] progress_kind: Option<DownloadProgressKind>,
 ) -> InstallerResult<()> {
     let config = get_config();
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
     #[cfg(feature = "events")]
     let progress = match (event_bus, progress_kind) {
         (Some(bus), Some(kind)) if !tasks.is_empty() => Some(ProgressState {
@@ -397,36 +529,63 @@ pub async fn download_with_concurrency_limit(
         }),
         _ => None,
     };
-    let futures: Vec<_> = tasks
-        .iter()
-        .map(|task| {
-            let sem = semaphore.clone();
+
+    let mut unfinished = run_pass(
+        tasks.iter().collect(),
+        transfer,
+        config.max_concurrent_downloads,
+        #[cfg(feature = "events")]
+        event_bus,
+        #[cfg(feature = "events")]
+        progress.as_ref(),
+    )
+    .await;
+
+    // A pass that gave up found the link down; a second one would only make
+    // the user wait longer for the same error.
+    let gave_up = unfinished.iter().any(|entry| entry.error.is_none());
+
+    if !unfinished.is_empty() && !gave_up {
+        lighty_core::trace_warn!(
+            "[Installer] {} of {} downloads failed, retrying them {} at a time",
+            unfinished.len(),
+            tasks.len(),
+            RECOVERY_CONCURRENCY
+        );
+
+        unfinished = run_pass(
+            unfinished.into_iter().map(|entry| entry.task).collect(),
+            transfer,
+            RECOVERY_CONCURRENCY,
             #[cfg(feature = "events")]
-            let progress = progress.clone();
-            async move {
-                let _permit = sem.acquire().await
-                    .map_err(|_| InstallerError::ConcurrencyClosed)?;
-                download_large_file(
-                    task.url,
-                    &task.dest,
-                    task.sha1,
-                    #[cfg(feature = "events")]
-                    event_bus,
-                )
-                .await?;
+            event_bus,
+            #[cfg(feature = "events")]
+            progress.as_ref(),
+        )
+        .await;
+    }
 
-                #[cfg(feature = "events")]
-                if let Some(progress) = &progress {
-                    progress.emit_progress();
-                }
+    match unfinished.into_iter().find_map(|entry| entry.error) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
 
-                Ok::<(), InstallerError>(())
-            }
-        })
-        .collect();
-
-    try_join_all(futures).await?;
-    Ok(())
+/// Downloads multiple large files with concurrency limit
+pub async fn download_with_concurrency_limit(
+    tasks: Vec<DownloadTask<'_>>,
+    #[cfg(feature = "events")] event_bus: Option<&EventBus>,
+    #[cfg(feature = "events")] progress_kind: Option<DownloadProgressKind>,
+) -> InstallerResult<()> {
+    download_batch(
+        tasks,
+        Transfer::Streamed,
+        #[cfg(feature = "events")]
+        event_bus,
+        #[cfg(feature = "events")]
+        progress_kind,
+    )
+    .await
 }
 
 /// Downloads multiple small files with concurrency limit
@@ -435,46 +594,165 @@ pub async fn download_small_with_concurrency_limit(
     #[cfg(feature = "events")] event_bus: Option<&EventBus>,
     #[cfg(feature = "events")] progress_kind: Option<DownloadProgressKind>,
 ) -> InstallerResult<()> {
-    let config = get_config();
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads));
-    #[cfg(feature = "events")]
-    let progress = match (event_bus, progress_kind) {
-        (Some(bus), Some(kind)) if !tasks.is_empty() => Some(ProgressState {
-            bus,
-            kind,
-            total: tasks.len(),
-            current: Arc::new(AtomicUsize::new(0)),
-        }),
-        _ => None,
-    };
-    let futures: Vec<_> = tasks
-        .iter()
-        .map(|task| {
-            let sem = semaphore.clone();
-            #[cfg(feature = "events")]
-            let progress = progress.clone();
-            async move {
-                let _permit = sem.acquire().await
-                    .map_err(|_| InstallerError::ConcurrencyClosed)?;
-                download_small_file(
-                    task.url,
-                    &task.dest,
-                    task.sha1,
-                    #[cfg(feature = "events")]
-                    event_bus,
-                )
-                .await?;
+    download_batch(
+        tasks,
+        Transfer::InMemory,
+        #[cfg(feature = "events")]
+        event_bus,
+        #[cfg(feature = "events")]
+        progress_kind,
+    )
+    .await
+}
 
-                #[cfg(feature = "events")]
-                if let Some(progress) = &progress {
-                    progress.emit_progress();
-                }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
 
-                Ok::<(), InstallerError>(())
+    /// Serves `/ok/*` always, `/dead/*` never, and `/flaky/*` only from the
+    /// request after `failures_before_success` refusals of that same path.
+    async fn serve(failures_before_success: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let hits = hits.clone();
+
+                tokio::spawn(async move {
+                    let mut request = vec![0u8; 2048];
+                    let read = socket.read(&mut request).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&request[..read]).into_owned();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+
+                    let seen = {
+                        let mut hits = hits.lock().unwrap();
+                        let seen = hits.entry(path.clone()).or_insert(0);
+                        *seen += 1;
+                        *seen
+                    };
+
+                    let served = path.starts_with("/ok")
+                        || (path.starts_with("/flaky") && seen > failures_before_success);
+                    let response = if served {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody"
+                    } else {
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
             }
-        })
-        .collect();
+        });
 
-    try_join_all(futures).await?;
-    Ok(())
+        format!("http://{}", address)
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lighty-downloader-{}-{}", name, fastrand::u32(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn run(tasks: Vec<DownloadTask<'_>>, transfer: Transfer) -> InstallerResult<()> {
+        download_batch(
+            tasks,
+            transfer,
+            #[cfg(feature = "events")]
+            None,
+            #[cfg(feature = "events")]
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn one_dead_file_does_not_cancel_the_rest() {
+        let base = serve(0).await;
+        let dir = scratch_dir("dead");
+        let urls = [
+            format!("{}/ok/a", base),
+            format!("{}/dead/b", base),
+            format!("{}/ok/c", base),
+        ];
+        let tasks = urls
+            .iter()
+            .zip(["a", "b", "c"])
+            .map(|(url, name)| DownloadTask { url, dest: dir.join(name), sha1: None, size: 4 })
+            .collect();
+
+        let error = run(tasks, Transfer::InMemory).await.unwrap_err().to_string();
+
+        assert!(error.contains("/dead/b"), "{error}");
+        assert!(error.contains("HTTP 500"), "{error}");
+        assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"body");
+        assert_eq!(std::fs::read(dir.join("c")).unwrap(), b"body");
+        assert!(!dir.join("b").exists());
+        assert!(!dir.join("a.part").exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn second_pass_recovers_what_the_first_gave_up_on() {
+        // One more refusal than a single file gets attempts in the first pass.
+        let base = serve(get_config().max_retries as usize).await;
+
+        for transfer in [Transfer::InMemory, Transfer::Streamed] {
+            let dir = scratch_dir("flaky");
+            let name = match transfer {
+                Transfer::InMemory => "memory",
+                Transfer::Streamed => "streamed",
+            };
+            let urls = [format!("{}/ok/{}", base, name), format!("{}/flaky/{}", base, name)];
+            let tasks = urls
+                .iter()
+                .zip(["steady", "flaky"])
+                .map(|(url, file)| DownloadTask { url, dest: dir.join(file), sha1: None, size: 4 })
+                .collect();
+
+            run(tasks, transfer).await.unwrap();
+
+            assert_eq!(std::fs::read(dir.join("flaky")).unwrap(), b"body");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dead_link_stops_the_batch_early() {
+        let base = serve(0).await;
+        let dir = scratch_dir("down");
+        let urls: Vec<String> = (0..MAX_CONSECUTIVE_FAILURES + 4)
+            .map(|index| format!("{}/dead/{}", base, index))
+            .collect();
+        let tasks: Vec<_> = urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| DownloadTask { url, dest: dir.join(index.to_string()), sha1: None, size: 4 })
+            .collect();
+        let refs: Vec<&DownloadTask<'_>> = tasks.iter().collect();
+
+        let unfinished = run_pass(
+            refs,
+            Transfer::InMemory,
+            1,
+            #[cfg(feature = "events")]
+            None,
+            #[cfg(feature = "events")]
+            None,
+        )
+        .await;
+
+        let skipped = unfinished.iter().filter(|entry| entry.error.is_none()).count();
+        assert_eq!(unfinished.len(), tasks.len());
+        assert_eq!(skipped, 4);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

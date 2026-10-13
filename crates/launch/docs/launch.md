@@ -200,7 +200,7 @@ pub enum InstallerError {
     HttpStatus       { status: u16, url: String },
     Sha1Mismatch     { url: String, expected: String, actual: String },
     StalePartialFile { url: String },
-    RetriesExhausted { attempts: u32, url: String },
+    RetriesExhausted { attempts: u32, url: String, reason: String },
     ConcurrencyClosed,
     InvalidMetadata,
     NoPid,
