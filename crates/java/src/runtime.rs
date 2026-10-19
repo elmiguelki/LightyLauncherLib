@@ -35,6 +35,16 @@ impl JavaRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // On Linux, keep the game on X11 (XWayland under Wayland) whenever an X server is
+        // reachable: a native Wayland window is invisible to X11-based tools such as window
+        // detection or screen capture. Removing WAYLAND_DISPLAY is not enough, because libwayland
+        // then falls back to the default `wayland-0` socket; pointing it at a socket that does
+        // not exist makes GLFW's Wayland backend fail and fall back to X11.
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
+            command.env("WAYLAND_DISPLAY", "lighty-x11-only");
+        }
+
         // On Windows, hide the console window
         #[cfg(windows)]
         {
