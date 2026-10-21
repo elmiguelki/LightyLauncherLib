@@ -113,6 +113,7 @@ where
                     .await?;
             }
 
+            record_shared_resources_usage(self, builder).await;
             lighty_core::trace_info!("[Installer] Installation completed successfully!");
             return Ok(());
         }
@@ -217,10 +218,67 @@ where
             }));
         }
 
+        record_shared_resources_usage(self, builder).await;
         lighty_core::trace_info!("[Installer] Installation completed successfully!");
         Ok(())
     }
 }
+
+/// File, under `game_dirs`, listing what the instance uses from a shared
+/// resources store, so the launcher can collect files no instance needs.
+pub const RESOURCES_USAGE_FILE: &str = "resources-usage.json";
+
+/// Writes [`RESOURCES_USAGE_FILE`] when the instance installs into a shared
+/// store. Paths are relative to `resources_dir`, with `/` separators.
+async fn record_shared_resources_usage(version: &impl VersionInfo, builder: &Version) {
+    if !version.has_shared_resources() {
+        return;
+    }
+
+    let mut libraries: Vec<String> = builder
+        .libraries
+        .iter()
+        .filter_map(|lib| lib.path.as_deref())
+        .chain(
+            builder
+                .natives
+                .iter()
+                .flatten()
+                .filter_map(|native| native.path.as_deref()),
+        )
+        .map(|path| path.replace('\\', "/"))
+        .collect();
+    libraries.sort_unstable();
+    libraries.dedup();
+
+    let client_jar = builder.client.as_ref().and_then(|_| {
+        version
+            .client_jar_path()
+            .strip_prefix(version.resources_dir())
+            .ok()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+    });
+
+    let usage = serde_json::json!({
+        "format": 1,
+        "minecraft_version": version.minecraft_version(),
+        "loader": format!("{:?}", version.loader()).to_lowercase(),
+        "loader_version": version.loader_version(),
+        "asset_index": builder.assets_index.as_ref().map(|index| index.id.clone()),
+        "client_jar": client_jar,
+        "libraries": libraries,
+    });
+
+    let path = version.game_dirs().join(RESOURCES_USAGE_FILE);
+    let written = match serde_json::to_vec_pretty(&usage) {
+        Ok(bytes) => tokio::fs::write(&path, bytes).await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = written {
+        lighty_core::trace_warn!("[Installer] Failed to write {}: {}", path.display(), e);
+    }
+}
+
 
 /// Resolves the optional modpack + the user-attached mod requests concurrently,
 /// merging both into a clone of `builder.mods`. Returns `None` when neither
@@ -334,9 +392,9 @@ async fn create_directories(version: &impl VersionInfo) {
     // runtime_dir() defaults to game_dirs but may be rewritten by the runner
     // via set_runtime_dir() to honour arg_overrides[KEY_GAME_DIRECTORY].
     mkdir!(version.runtime_dir());
-    mkdir!(parent_path.join("libraries"));
+    mkdir!(version.libraries_dir());
     mkdir!(parent_path.join("natives"));
-    mkdir!(parent_path.join("assets").join("objects"));
+    mkdir!(version.assets_dir().join("objects"));
 }
 
 /// Sums the `Content-Length` of every URL whose size the manifest omitted.

@@ -75,7 +75,8 @@ where
                     info.minecraft_version().to_string(),
                     self.game_dirs().to_path_buf(),
                     self.java_dirs().to_path_buf(),
-                ))
+                )
+                .with_resources_of(self))
             }
 
             _ => Ok(ResolvedInstance::of(self)),

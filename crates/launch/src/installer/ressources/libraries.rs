@@ -20,7 +20,7 @@ pub async fn collect_library_tasks<'a>(
     version: &impl VersionInfo,
     libraries: &'a [Library],
 ) -> Vec<DownloadTask<'a>> {
-    let parent_path = version.game_dirs().join("libraries");
+    let parent_path = version.libraries_dir();
     let mut tasks = Vec::new();
 
     for lib in libraries {

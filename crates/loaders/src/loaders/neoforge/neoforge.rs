@@ -52,7 +52,7 @@ impl Query for NeoForgeQuery {
 
         lighty_core::trace_debug!(url = %installer_url, loader = "neoforge", "Installer URL constructed");
 
-        let profiles_dir = version.game_dirs().join(".neoforge");
+        let profiles_dir = version.loader_cache_dir(".neoforge");
         mkdir!(profiles_dir);
 
         let installer_path = profiles_dir.join(format!("neoforge-{}-installer.jar", version.loader_version()));
@@ -151,8 +151,7 @@ impl Query for NeoForgeQuery {
 /// main class and arguments live there, not in the install profile.
 async fn read_version_meta<V: VersionInfo>(version: &V) -> Result<ForgeVersionManifest> {
     let installer_path = version
-        .game_dirs()
-        .join(".neoforge")
+        .loader_cache_dir(".neoforge")
         .join(format!("neoforge-{}-installer.jar", version.loader_version()));
     let (_, version_meta) = read_jsons_from_jar(&installer_path).await?;
     Ok(version_meta)
@@ -330,8 +329,7 @@ pub fn build_installer_url<V: VersionInfo>(version: &V) -> String {
 /// Returns the on-disk path where the NeoForge installer is cached.
 pub fn installer_cache_path<V: VersionInfo>(version: &V) -> PathBuf {
     version
-        .game_dirs()
-        .join(".neoforge")
+        .loader_cache_dir(".neoforge")
         .join(format!("neoforge-{}-installer.jar", version.loader_version()))
 }
 

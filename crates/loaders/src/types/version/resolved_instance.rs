@@ -19,6 +19,7 @@ pub struct ResolvedInstance {
     minecraft_version: String,
     game_dirs: PathBuf,
     java_dirs: PathBuf,
+    resources_dir: Option<PathBuf>,
 }
 
 impl ResolvedInstance {
@@ -37,7 +38,16 @@ impl ResolvedInstance {
             minecraft_version,
             game_dirs,
             java_dirs,
+            resources_dir: None,
         }
+    }
+
+    /// Keeps the shared resources root of the builder it was resolved from.
+    pub fn with_resources_of<V: VersionInfo>(mut self, version: &V) -> Self {
+        self.resources_dir = version
+            .has_shared_resources()
+            .then(|| version.resources_dir().to_path_buf());
+        self
     }
 
     /// Copies a builder as-is, for the loaders that already tell the truth.
@@ -50,6 +60,7 @@ impl ResolvedInstance {
             version.game_dirs().to_path_buf(),
             version.java_dirs().to_path_buf(),
         )
+        .with_resources_of(version)
     }
 }
 
@@ -74,6 +85,10 @@ impl VersionInfo for ResolvedInstance {
 
     fn java_dirs(&self) -> &Path {
         &self.java_dirs
+    }
+
+    fn resources_dir(&self) -> &Path {
+        self.resources_dir.as_deref().unwrap_or(&self.game_dirs)
     }
 
     fn loader(&self) -> &Self::LoaderType {

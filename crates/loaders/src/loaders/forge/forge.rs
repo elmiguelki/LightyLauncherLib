@@ -131,7 +131,7 @@ async fn fetch_modern_install_data<V: VersionInfo>(version: &V) -> Result<ForgeR
     let installer_url = build_installer_url(version);
     lighty_core::trace_debug!(url = %installer_url, loader = "forge", "Installer URL constructed");
 
-    let profiles_dir = version.game_dirs().join(".forge");
+    let profiles_dir = version.loader_cache_dir(".forge");
     mkdir!(profiles_dir);
 
     let installer_path = installer_cache_path(version);
@@ -399,8 +399,7 @@ pub fn installer_cache_path<V: VersionInfo>(version: &V) -> PathBuf {
         format!("{}-{}", mc, loader_ver)
     };
     version
-        .game_dirs()
-        .join(".forge")
+        .loader_cache_dir(".forge")
         .join(format!("forge-{}-installer.jar", full_ver))
 }
 

@@ -24,7 +24,7 @@ pub async fn collect_asset_tasks<'a>(
         return Vec::new();
     };
 
-    let assets_root = version.game_dirs().join("assets");
+    let assets_root = version.assets_dir();
     let objects_root = assets_root.join("objects");
     let mut tasks = Vec::new();
 

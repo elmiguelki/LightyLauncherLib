@@ -262,9 +262,9 @@ fn create_variable_map<T: VersionInfo>(
         // runtime_dir() is the single source of truth shared with the install
         // pipeline so mods land where the game actually scans for them.
         map.insert(KEY_GAME_DIRECTORY.into(), version.runtime_dir().display().to_string());
-        map.insert(KEY_ASSETS_ROOT.into(), version.game_dirs().join("assets").display().to_string());
+        map.insert(KEY_ASSETS_ROOT.into(), version.assets_dir().display().to_string());
         map.insert(KEY_NATIVES_DIRECTORY.into(), version.game_dirs().join("natives").display().to_string());
-        map.insert(KEY_LIBRARY_DIRECTORY.into(), version.game_dirs().join("libraries").display().to_string());
+        map.insert(KEY_LIBRARY_DIRECTORY.into(), version.libraries_dir().display().to_string());
 
         let assets_index_name = builder.assets_index
             .as_ref()
@@ -289,7 +289,7 @@ fn build_classpath<T: VersionInfo>(version: &T, libraries: &[lighty_loaders::typ
         #[cfg(not(target_os = "windows"))]
         let separator = ":";
 
-        let lib_dir = version.game_dirs().join("libraries");
+        let lib_dir = version.libraries_dir();
 
         let mut classpath_entries: Vec<String> = libraries
             .iter()
@@ -301,7 +301,7 @@ fn build_classpath<T: VersionInfo>(version: &T, libraries: &[lighty_loaders::typ
             .collect();
 
         classpath_entries.push(
-            version.game_dirs().join(format!("{}.jar", version.name())).display().to_string()
+            version.client_jar_path().display().to_string()
         );
 
         classpath_entries.join(separator)

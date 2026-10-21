@@ -29,6 +29,9 @@ pub struct VersionBuilder<L = ()> {
     pub game_dirs: PathBuf,
     pub java_dirs: PathBuf,
     pub runtime_dir: PathBuf,
+    /// Store shared across instances (`assets/`, `libraries/`, client
+    /// JARs, loader installers). `None` keeps them inside `game_dirs`.
+    pub resources_dir: Option<PathBuf>,
     pub mod_requests: Vec<ModRequest>,
     #[cfg(any(feature = "modrinth", feature = "curseforge"))]
     pub modpack: Option<ModpackSource>,
@@ -66,6 +69,7 @@ impl<L> VersionBuilder<L> {
             runtime_dir: game_dirs.clone(),
             game_dirs,
             java_dirs,
+            resources_dir: None,
             mod_requests: Vec::new(),
             #[cfg(any(feature = "modrinth", feature = "curseforge"))]
             modpack: None,
@@ -108,6 +112,24 @@ impl<L> VersionBuilder<L> {
     /// ```
     pub fn with_custom_java_dir(mut self, java_dir: PathBuf) -> Self {
         self.java_dirs = java_dir;
+        self
+    }
+
+    /// Shares `assets/`, `libraries/`, client JARs and loader installers
+    /// with every other instance pointed at the same directory.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use lighty_core::AppState;
+    /// # use lighty_loaders::types::Loader;
+    /// # use lighty_version::VersionBuilder;
+    /// use std::path::PathBuf;
+    /// # AppState::init("MyLauncher").unwrap();
+    /// let builder = VersionBuilder::new("my-instance", Loader::Vanilla, "", "1.21.1")
+    ///     .with_shared_resources_dir(PathBuf::from("/games/resources"));
+    /// ```
+    pub fn with_shared_resources_dir(mut self, resources_dir: PathBuf) -> Self {
+        self.resources_dir = Some(resources_dir);
         self
     }
 
@@ -201,6 +223,10 @@ impl<L: Clone + Send + Sync + Debug> VersionInfo for VersionBuilder<L> {
         &self.java_dirs
     }
 
+    fn resources_dir(&self) -> &Path {
+        self.resources_dir.as_deref().unwrap_or(&self.game_dirs)
+    }
+
     fn loader(&self) -> &Self::LoaderType {
         &self.loader
     }
@@ -241,6 +267,10 @@ impl<'b, L: Clone + Send + Sync + Debug> VersionInfo for &'b VersionBuilder<L> {
 
     fn java_dirs(&self) -> &Path {
         &self.java_dirs
+    }
+
+    fn resources_dir(&self) -> &Path {
+        self.resources_dir.as_deref().unwrap_or(&self.game_dirs)
     }
 
     fn loader(&self) -> &Self::LoaderType {

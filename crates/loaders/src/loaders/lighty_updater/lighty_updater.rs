@@ -114,7 +114,8 @@ impl Query for LightyQuery {
             server_info.minecraft_version().to_string(),
             version.game_dirs().to_path_buf(),
             version.java_dirs().to_path_buf(),
-        );
+        )
+        .with_resources_of(version);
 
         let mut builder = merge_metadata(&resolved).await?;
 

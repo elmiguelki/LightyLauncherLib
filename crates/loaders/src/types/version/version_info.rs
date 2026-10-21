@@ -24,6 +24,56 @@ pub trait VersionInfo: Clone + Send + Sync {
     /// Java directory (holds JRE installations).
     fn java_dirs(&self) -> &Path;
 
+    /// Root of the files several instances can share: `assets/`,
+    /// `libraries/`, client JARs and loader installers. Natives and the
+    /// runtime stay under [`Self::game_dirs`].
+    ///
+    /// Default: alias of [`Self::game_dirs`], which keeps everything
+    /// inside the instance.
+    fn resources_dir(&self) -> &Path {
+        self.game_dirs()
+    }
+
+    /// Whether [`Self::resources_dir`] is a store shared across instances.
+    fn has_shared_resources(&self) -> bool {
+        self.resources_dir() != self.game_dirs()
+    }
+
+    /// `assets/` root (indexes + objects).
+    fn assets_dir(&self) -> PathBuf {
+        self.resources_dir().join("assets")
+    }
+
+    /// `libraries/` root (maven layout).
+    fn libraries_dir(&self) -> PathBuf {
+        self.resources_dir().join("libraries")
+    }
+
+    /// Client JAR. Inside the instance it is named after the instance;
+    /// in a shared store it is keyed by Minecraft version.
+    fn client_jar_path(&self) -> PathBuf {
+        if self.has_shared_resources() {
+            let mc = self.minecraft_version();
+            self.resources_dir()
+                .join("versions")
+                .join(mc)
+                .join(format!("{mc}.jar"))
+        } else {
+            self.game_dirs().join(format!("{}.jar", self.name()))
+        }
+    }
+
+    /// Cache directory of a loader installer (`.forge`, `.neoforge`).
+    fn loader_cache_dir(&self, dot_dir: &str) -> PathBuf {
+        if self.has_shared_resources() {
+            self.resources_dir()
+                .join("loaders")
+                .join(dot_dir.trim_start_matches('.'))
+        } else {
+            self.game_dirs().join(dot_dir)
+        }
+    }
+
     /// Returns the loader.
     fn loader(&self) -> &Self::LoaderType;
 

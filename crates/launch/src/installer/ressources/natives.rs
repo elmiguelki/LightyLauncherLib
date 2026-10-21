@@ -31,7 +31,7 @@ pub async fn collect_native_tasks<'a>(
         return (Vec::new(), Vec::new());
     }
 
-    let libraries_path = version.game_dirs().join("libraries");
+    let libraries_path = version.libraries_dir();
     let mut download_tasks = Vec::new();
     let mut extract_paths = Vec::new();
 

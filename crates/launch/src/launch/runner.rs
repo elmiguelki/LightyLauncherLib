@@ -577,13 +577,12 @@ where
     T: VersionInfo,
 {
     if let Some(asset_index) = &version.assets_index {
-        let indexes_dir = builder.game_dirs().join("assets").join("indexes");
+        let indexes_dir = builder.assets_dir().join("indexes");
         // Ensure directory exists
         lighty_core::mkdir!(indexes_dir);
 
         let index_file_path = builder
-            .game_dirs()
-            .join("assets")
+            .assets_dir()
             .join("indexes")
             .join(format!("{}.json", asset_index.id));
 

@@ -19,7 +19,7 @@ pub async fn collect_client_task<'a>(
 ) -> Option<DownloadTask<'a>> {
     let client = client?;
     let url = client.url.as_deref()?;
-    let client_path = version.game_dirs().join(format!("{}.jar", version.name()));
+    let client_path = version.client_jar_path();
 
     needs_download(&client_path, client.sha1.as_ref(), "Client JAR")
         .await

@@ -109,8 +109,7 @@ pub fn legacy_installer_path<V: VersionInfo>(version: &V) -> PathBuf {
         format!("{}-{}", mc, loader_ver)
     };
     version
-        .game_dirs()
-        .join(".forge")
+        .loader_cache_dir(".forge")
         .join(format!("forge-{}-installer.jar", full_ver))
 }
 
@@ -125,7 +124,7 @@ pub async fn ensure_installer_cached<V: VersionInfo>(version: &V) -> Result<Path
         });
     }
 
-    let profiles_dir = version.game_dirs().join(".forge");
+    let profiles_dir = version.loader_cache_dir(".forge");
     mkdir!(profiles_dir);
 
     let installer_path = legacy_installer_path(version);
@@ -466,7 +465,7 @@ pub async fn extract_universal_jar<V: VersionInfo>(
         });
     }
 
-    let target_path = version.game_dirs().join("libraries").join(
+    let target_path = version.libraries_dir().join(
         maven_relative_path(&profile.install.path).ok_or_else(|| QueryError::Conversion {
             message: format!("Invalid Maven coord in install.path: {}", profile.install.path),
         })?,

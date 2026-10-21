@@ -28,7 +28,7 @@ fn processors_marker_path<V: VersionInfo>(version: &V, dot_dir: &str) -> PathBuf
     } else {
         format!("{}-{}", mc, loader_ver)
     };
-    version.game_dirs().join(dot_dir).join(format!(
+    version.loader_cache_dir(dot_dir).join(format!(
         "processors-{}.sha1",
         full_ver
     ))
@@ -61,7 +61,7 @@ pub(crate) async fn run_forge_install_processors<V: VersionInfo>(
 
     // Some Forge versions ship runtime artifacts at `/maven/...` inside the
     // installer (forge-shim.jar in 1.21+, etc.). Idempotent.
-    let libraries_dir = version.game_dirs().join("libraries");
+    let libraries_dir = version.libraries_dir();
     extract_maven_bundle_to_libraries(&installer_path, &libraries_dir).map_err(|e| {
         QueryError::Conversion {
             message: format!(

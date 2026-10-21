@@ -268,7 +268,7 @@ fn extract_assets_index(full_data: &VanillaMetaData) -> AssetIndex {
 async fn extract_assets<V: VersionInfo>(version: &V, full_data: &VanillaMetaData) -> Result<AssetsFile> {
     let asset_index = &full_data.asset_index;
 
-    let indexes_dir = version.game_dirs().join("assets").join("indexes");
+    let indexes_dir = version.assets_dir().join("indexes");
     mkdir!(indexes_dir);
 
     let index_file_path = indexes_dir.join(format!("{}.json", asset_index.id));

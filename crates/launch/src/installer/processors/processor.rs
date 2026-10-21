@@ -41,8 +41,8 @@ impl ProcessorContext {
         java_path: PathBuf,
     ) -> Self {
         let side = "client".to_string();
-        let game_dir = version.game_dirs();
-        let libraries_dir = game_dir.join("libraries");
+        let game_dir = version.resources_dir();
+        let libraries_dir = version.libraries_dir();
 
         let mut data = HashMap::new();
         for (key, value) in &metadata.data {
@@ -64,7 +64,7 @@ impl ProcessorContext {
             installer_path.to_string_lossy().to_string(),
         );
 
-        let minecraft_jar = game_dir.join(format!("{}.jar", version.name()));
+        let minecraft_jar = version.client_jar_path();
         data.insert(
             "MINECRAFT_JAR".to_string(),
             minecraft_jar.to_string_lossy().to_string(),
