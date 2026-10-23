@@ -129,6 +129,12 @@ impl<T: VersionInfo> Arguments for T {
             .map(|jvm| replace_variables_in_vec(jvm, &variables))
             .unwrap_or_else(|| build_default_jvm_args(&variables));
 
+        // The ignoreList of (Neo)Forge names the client JAR `${version_name}.jar`,
+        // which a shared store keys by Minecraft version instead.
+        if let Some(client_jar) = self.client_jar_path().file_name().and_then(|f| f.to_str()) {
+            add_to_ignore_list(&mut jvm_args, client_jar);
+        }
+
         // macOS: -XstartOnFirstThread is MANDATORY for LWJGL/OpenGL
         #[cfg(target_os = "macos")]
         if !jvm_args.iter().any(|arg| arg == "-XstartOnFirstThread") {
@@ -436,6 +442,27 @@ fn apply_jvm_removals(jvm_args: &mut Vec<String>, jvm_removals: &HashSet<String>
     });
 }
 
+/// Adds `entry` to the `-DignoreList=` of BootstrapLauncher, if the version has one.
+///
+/// BootstrapLauncher keeps every classpath JAR whose file name starts with an
+/// entry out of the module layers. A client JAR left in becomes an automatic
+/// module that exports the packages of `minecraft` a second time.
+fn add_to_ignore_list(jvm_args: &mut [String], entry: &str) {
+    const IGNORE_LIST: &str = "-DignoreList=";
+    let Some(arg) = jvm_args.iter_mut().find(|arg| arg.starts_with(IGNORE_LIST)) else {
+        return;
+    };
+    let list = &arg[IGNORE_LIST.len()..];
+    if list.split(',').any(|existing| existing == entry) {
+        return;
+    }
+    *arg = if list.is_empty() {
+        format!("{IGNORE_LIST}{entry}")
+    } else {
+        format!("{arg},{entry}")
+    };
+}
+
 /// Filters out game arguments whose key matches an entry in `arg_removals`.
 fn apply_arg_removals(game_args: Vec<String>, arg_removals: &HashSet<String>) -> Vec<String> {
     game_args.into_iter()
@@ -512,5 +539,28 @@ fn get_path_separator() -> &'static str {
     }
     #[cfg(not(target_os = "windows"))] {
         ":"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_to_ignore_list;
+
+    #[test]
+    fn ignore_list_gets_shared_client_jar() {
+        let mut args = vec!["-DignoreList=client-extra,novaterra-dev-1.jar".to_string()];
+        add_to_ignore_list(&mut args, "1.21.1.jar");
+        assert_eq!(args[0], "-DignoreList=client-extra,novaterra-dev-1.jar,1.21.1.jar");
+    }
+
+    #[test]
+    fn ignore_list_is_left_alone_when_already_listed_or_absent() {
+        let mut args = vec!["-DignoreList=client-extra,1.21.1.jar".to_string()];
+        add_to_ignore_list(&mut args, "1.21.1.jar");
+        assert_eq!(args[0], "-DignoreList=client-extra,1.21.1.jar");
+
+        let mut args = vec!["-Xmx4G".to_string()];
+        add_to_ignore_list(&mut args, "1.21.1.jar");
+        assert_eq!(args, vec!["-Xmx4G".to_string()]);
     }
 }
