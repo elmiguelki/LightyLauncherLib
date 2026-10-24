@@ -64,6 +64,11 @@ pub enum InstallerError {
 
     #[error("Unable to get process ID from child process")]
     NoPid,
+
+    /// A native library is held open by another process, usually a game
+    /// from a previous launch that is still running.
+    #[error("Native library in use by another process: {path}")]
+    NativesLocked { path: String },
 }
 
 pub type InstallerResult<T> = std::result::Result<T, InstallerError>;

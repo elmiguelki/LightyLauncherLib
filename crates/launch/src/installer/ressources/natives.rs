@@ -10,8 +10,8 @@ use tokio::io::BufReader;
 use lighty_loaders::types::{VersionInfo, version_metadata::Native};
 use lighty_core::{mkdir, time_it};
 use futures::future::try_join_all;
-use futures_util::io;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use futures_util::AsyncReadExt;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use crate::errors::{InstallerError, InstallerResult};
 use crate::installer::verifier::needs_download;
 use crate::installer::downloader::{download_with_concurrency_limit, DownloadTask};
@@ -67,8 +67,12 @@ pub async fn download_and_extract_natives(
     let natives_root = version.game_dirs().join("natives");
 
     // Natives are cleaned on each install since LWJGL needs a fresh extraction.
+    // A running game keeps its DLLs locked on Windows, so a partial cleanup is
+    // tolerated: identical locked files are skipped during extraction.
     if natives_root.exists() {
-        let _ = fs::remove_dir_all(&natives_root).await;
+        if let Err(e) = fs::remove_dir_all(&natives_root).await {
+            lighty_core::trace_warn!("[Installer] Could not fully clean natives directory: {}", e);
+        }
     }
 
     let natives_extract_path = match jvm_arguments.and_then(library_subdir) {
@@ -151,13 +155,32 @@ async fn extract_native(jar_path: PathBuf, natives_dir: PathBuf) -> InstallerRes
             );
 
             let mut entry_reader = reader.reader_with_entry(index).await?;
-            let dest_file = tokio::fs::File::create(&dest_path).await?;
+            let mut contents = Vec::new();
+            entry_reader.read_to_end(&mut contents).await?;
 
-            io::copy(&mut entry_reader, &mut dest_file.compat_write()).await?;
+            // Already extracted with the same contents (possibly locked by a
+            // running game): nothing to write.
+            if fs::read(&dest_path).await.is_ok_and(|existing| existing == contents) {
+                continue;
+            }
+
+            fs::write(&dest_path, &contents).await.map_err(|e| {
+                if is_file_locked(&e) {
+                    InstallerError::NativesLocked { path: dest_path.display().to_string() }
+                } else {
+                    e.into()
+                }
+            })?;
         }
     }
 
     Ok(())
+}
+
+/// True when Windows refused access because another process holds the file
+/// (ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION).
+fn is_file_locked(error: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(32) | Some(33))
 }
 
 /// Returns true for native library files inside the JAR.
