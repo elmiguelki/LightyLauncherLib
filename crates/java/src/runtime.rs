@@ -4,6 +4,7 @@
 //! Java process execution wrapper.
 
 use crate::errors::{JavaRuntimeError, JavaRuntimeResult};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
@@ -19,6 +20,16 @@ impl JavaRuntime {
 
     /// Spawns a Java process with the given arguments in `game_dir`.
     pub async fn execute(&self, arguments: Vec<String>, game_dir: &Path) -> JavaRuntimeResult<Child> {
+        self.execute_with_env(arguments, game_dir, &HashMap::new()).await
+    }
+
+    /// Like [`Self::execute`], with extra environment variables that only the spawned process gets.
+    pub async fn execute_with_env(
+        &self,
+        arguments: Vec<String>,
+        game_dir: &Path,
+        env: &HashMap<String, String>,
+    ) -> JavaRuntimeResult<Child> {
         if !self.0.exists() {
             return Err(JavaRuntimeError::NotFound {
                 path: self.0.clone(),
@@ -31,6 +42,7 @@ impl JavaRuntime {
         command
             .current_dir(game_dir)
             .args(arguments)
+            .envs(env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

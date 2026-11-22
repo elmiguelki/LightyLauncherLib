@@ -24,6 +24,7 @@ pub struct LaunchBuilder<'a, T> {
     pub(crate) arg_overrides: HashMap<String, String>,
     pub(crate) arg_removals: HashSet<String>,
     pub(crate) raw_args: Vec<String>,
+    pub(crate) env: HashMap<String, String>,
     #[cfg(feature = "events")]
     pub(crate) event_bus: Option<&'a EventBus>,
 }
@@ -51,6 +52,7 @@ where
             arg_overrides: HashMap::new(),
             arg_removals: HashSet::new(),
             raw_args: Vec::new(),
+            env: HashMap::new(),
             #[cfg(feature = "events")]
             event_bus: None,
         }
@@ -82,6 +84,13 @@ where
     #[cfg(feature = "events")]
     pub fn with_event_bus(mut self, event_bus: &'a EventBus) -> Self {
         self.event_bus = Some(event_bus);
+        self
+    }
+
+    /// Set an environment variable of the game process only. The current process keeps its
+    /// environment, and the value never shows up in the command line.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
         self
     }
 
@@ -179,6 +188,7 @@ where
             &self.arg_overrides,
             &self.arg_removals,
             &self.raw_args,
+            &self.env,
             #[cfg(feature = "events")]
             self.event_bus,
         )
